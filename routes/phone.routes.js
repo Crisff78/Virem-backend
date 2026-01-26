@@ -2,6 +2,13 @@ const express = require('express');
 
 const router = express.Router();
 const fetch = require('node-fetch');
+const fetchFn = (...args) => {
+  if (typeof fetch === 'function') {
+    return fetch(...args);
+  }
+
+  return import('node-fetch').then(({ default: fetchModule }) => fetchModule(...args));
+};
 
 
 const VERIPHONE_API_KEY = process.env.VERIPHONE_API_KEY;
@@ -45,7 +52,7 @@ router.post('/validar-telefono', async (req, res) => {
       `${VERIPHONE_URL}?key=${encodeURIComponent(VERIPHONE_API_KEY)}` +
       `&phone=${encodeURIComponent(phoneE164)}`;
 
-    const response = await fetch(url);
+    const response = await fetchFn(url);
     if (!response.ok) {
       return res.status(502).json({
         success: false,
