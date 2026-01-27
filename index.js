@@ -3,15 +3,30 @@ const cors = require('cors');
 require('dotenv').config();
 
 const app = express();
+
+// Middlewares
 app.use(cors());
 app.use(express.json());
+
+// ✅ Ruta raíz (para que no te salga "Ruta no existe: GET /")
+app.get('/', (req, res) => {
+  res.json({
+    success: true,
+    message: '🚀 Backend corriendo correctamente',
+    endpoints: {
+      health: '/health',
+      auth: '/api/auth',
+      phone: '/api/phone',
+    },
+  });
+});
 
 // ✅ Health check
 app.get('/health', (req, res) => {
   res.json({ success: true, message: 'Backend OK ✅' });
 });
 
-// ✅ Importar rutas (OJO: rutas correctas)
+// ✅ Importar rutas
 const authRoutes = require('./routes/auth.routes.js');
 const phoneRoutes = require('./routes/phone.routes.js');
 
@@ -19,7 +34,7 @@ const phoneRoutes = require('./routes/phone.routes.js');
 app.use('/api/auth', authRoutes);
 app.use('/api/phone', phoneRoutes);
 
-// ✅ Ruta “catch-all” (para saber si te estás equivocando de endpoint)
+// ✅ Catch-all (si te equivocas de endpoint)
 app.use((req, res) => {
   return res.status(404).json({
     success: false,
