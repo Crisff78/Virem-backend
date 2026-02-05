@@ -42,7 +42,6 @@ router.post("/register", async (req, res) => {
     password,
   } = req.body;
 
-  // Log para ver qué llega
   console.log("✅ POST /api/auth/register");
   console.log("📦 BODY:", req.body);
 
@@ -64,12 +63,14 @@ router.post("/register", async (req, res) => {
   }
 
   const client = await pool.connect();
+
   try {
     const normalizedEmail = String(email).toLowerCase().trim();
+    const fechaSQL = toSqlDate(fechanacimiento);
 
-    // Email único (fuera o dentro de tx da igual, pero aquí lo hacemos dentro)
     await client.query("BEGIN");
 
+    // ✅ Email único
     const existing = await client.query(
       "SELECT usuarioid FROM usuario WHERE email = $1",
       [normalizedEmail]
@@ -84,26 +85,8 @@ router.post("/register", async (req, res) => {
     }
 
     const passwordhash = await bcrypt.hash(String(password), 10);
-    const fechaSQL = toSqlDate(fechanacimiento);
 
-    // Insert paciente
-    const insertPaciente = await client.query(
-      `INSERT INTO paciente (nombres, apellidos, fechanacimiento, genero, cedula, telefono, fecharegistro)
-       VALUES ($1,$2,$3,$4,$5,$6,NOW())
-       RETURNING pacienteid`,
-      [
-        String(nombres).trim(),
-        String(apellidos).trim(),
-        fechaSQL,
-        String(genero).trim(),
-        String(cedula).trim(),
-        String(telefono).trim(),
-      ]
-    );
-
-    const pacienteid = insertPaciente.rows[0].pacienteid;
-
-    // Insert usuario
+    // ✅ Insert usuario PRIMERO (para evitar problemas de FK raros)
     const rolid = Number(process.env.DEFAULT_ROLID || 1);
     const activo = String(process.env.DEFAULT_ACTIVO || "true") === "true";
 
@@ -114,18 +97,41 @@ router.post("/register", async (req, res) => {
       [rolid, normalizedEmail, passwordhash, activo]
     );
 
+    const usuarioid = insertUsuario.rows[0].usuarioid;
+
+    // ✅ Insert paciente (con usuarioid si tu BD lo requiere)
+    // OJO: si tu tabla paciente NO tiene usuarioid, quita esa parte.
+    // Como tu BD tiene fk_usuario: FOREIGN KEY (pacienteid) REFERENCES usuario(usuarioid)
+    // eso es raro, pero lo manejamos con 2 inserts:
+    //   - Insert usuario => usuarioid
+    //   - Insert paciente forzando pacienteid = usuarioid
+    const insertPaciente = await client.query(
+      `INSERT INTO paciente (pacienteid, nombres, apellidos, fechanacimiento, genero, cedula, telefono, fecharegistro)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
+       RETURNING pacienteid`,
+      [
+        usuarioid,
+        String(nombres).trim(),
+        String(apellidos).trim(),
+        fechaSQL,
+        String(genero).trim(),
+        String(cedula).replace(/\D/g, "").slice(0, 11),
+        String(telefono).replace(/\D/g, "").slice(0, 11),
+      ]
+    );
+
     await client.query("COMMIT");
 
     console.log("✅ REGISTRO OK:", {
-      pacienteid,
-      usuarioid: insertUsuario.rows[0].usuarioid,
+      pacienteid: insertPaciente.rows[0].pacienteid,
+      usuarioid,
     });
 
     return res.json({
       success: true,
       message: "Paciente registrado correctamente.",
-      pacienteid,
-      usuarioid: insertUsuario.rows[0].usuarioid,
+      pacienteid: insertPaciente.rows[0].pacienteid,
+      usuarioid,
     });
   } catch (err) {
     try {
@@ -133,10 +139,11 @@ router.post("/register", async (req, res) => {
     } catch (_) {}
 
     console.error("❌ Error register paciente:", err);
+
     return res.status(500).json({
       success: false,
       message: "Error interno registrando paciente.",
-      error: err.message,
+      error: err?.message || String(err),
     });
   } finally {
     client.release();

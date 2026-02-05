@@ -16,6 +16,7 @@ app.get("/", (req, res) => {
     endpoints: {
       health: "/health",
       auth: "/api/auth",
+      validarTelefono: "/api/validar-telefono",
     },
   });
 });
@@ -25,9 +26,19 @@ app.get("/health", (req, res) => {
   res.json({ success: true, message: "Backend OK ✅" });
 });
 
-// Rutas
+// ===============================
+// ✅ RUTAS AUTH
+// ===============================
 const authRoutes = require("./routes/auth.routes.js");
 app.use("/api/auth", authRoutes);
+
+// ===============================
+// ✅ RUTA VALIDAR TELÉFONO
+// Archivo: routes/phone.routes.js
+// Endpoint: POST /api/validar-telefono
+// ===============================
+const phoneRoutes = require("./routes/phone.routes.js");
+app.use("/api", phoneRoutes);
 
 // Catch-all
 app.use((req, res) => {
