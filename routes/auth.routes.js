@@ -42,6 +42,10 @@ router.post("/register", async (req, res) => {
     password,
   } = req.body;
 
+  // Log para ver qué llega
+  console.log("✅ POST /api/auth/register");
+  console.log("📦 BODY:", req.body);
+
   if (
     !nombres ||
     !apellidos ||
@@ -59,16 +63,20 @@ router.post("/register", async (req, res) => {
     });
   }
 
+  const client = await pool.connect();
   try {
     const normalizedEmail = String(email).toLowerCase().trim();
 
-    // Email único
-    const existing = await pool.query(
+    // Email único (fuera o dentro de tx da igual, pero aquí lo hacemos dentro)
+    await client.query("BEGIN");
+
+    const existing = await client.query(
       "SELECT usuarioid FROM usuario WHERE email = $1",
       [normalizedEmail]
     );
 
     if (existing.rows.length > 0) {
+      await client.query("ROLLBACK");
       return res.status(409).json({
         success: false,
         message: "Ese correo ya está registrado.",
@@ -78,10 +86,8 @@ router.post("/register", async (req, res) => {
     const passwordhash = await bcrypt.hash(String(password), 10);
     const fechaSQL = toSqlDate(fechanacimiento);
 
-    await pool.query("BEGIN");
-
     // Insert paciente
-    const insertPaciente = await pool.query(
+    const insertPaciente = await client.query(
       `INSERT INTO paciente (nombres, apellidos, fechanacimiento, genero, cedula, telefono, fecharegistro)
        VALUES ($1,$2,$3,$4,$5,$6,NOW())
        RETURNING pacienteid`,
@@ -101,14 +107,19 @@ router.post("/register", async (req, res) => {
     const rolid = Number(process.env.DEFAULT_ROLID || 1);
     const activo = String(process.env.DEFAULT_ACTIVO || "true") === "true";
 
-    const insertUsuario = await pool.query(
+    const insertUsuario = await client.query(
       `INSERT INTO usuario (rolid, email, passwordhash, fechacreacion, activo)
        VALUES ($1,$2,$3,NOW(),$4)
        RETURNING usuarioid`,
       [rolid, normalizedEmail, passwordhash, activo]
     );
 
-    await pool.query("COMMIT");
+    await client.query("COMMIT");
+
+    console.log("✅ REGISTRO OK:", {
+      pacienteid,
+      usuarioid: insertUsuario.rows[0].usuarioid,
+    });
 
     return res.json({
       success: true,
@@ -117,13 +128,18 @@ router.post("/register", async (req, res) => {
       usuarioid: insertUsuario.rows[0].usuarioid,
     });
   } catch (err) {
-    await pool.query("ROLLBACK");
-    console.error("Error register paciente:", err);
+    try {
+      await client.query("ROLLBACK");
+    } catch (_) {}
+
+    console.error("❌ Error register paciente:", err);
     return res.status(500).json({
       success: false,
       message: "Error interno registrando paciente.",
       error: err.message,
     });
+  } finally {
+    client.release();
   }
 });
 
