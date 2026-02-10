@@ -40,6 +40,14 @@ app.use("/api/auth", authRoutes);
 const phoneRoutes = require("./routes/phone.routes.js");
 app.use("/api", phoneRoutes);
 
+// ===============================
+// ✅ RUTA VALIDAR EXEQUÁTUR (SNS)
+// Endpoint: POST /api/validar-exequatur
+// ===============================
+const exequaturRoutes = require("./routes/exequatur.routes.js");
+app.use("/api", exequaturRoutes);
+
+
 // Catch-all
 app.use((req, res) => {
   return res.status(404).json({
