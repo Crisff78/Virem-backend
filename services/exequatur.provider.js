@@ -382,6 +382,7 @@ async function consultarExequaturSNS({ nombreCompleto }) {
     debugLog("Mejor score:", best.score, "Método:", best.method);
 
     const THRESHOLD = 0.6;
+    const NEAR_MATCH_THRESHOLD = 0.5;
     if (best.score >= THRESHOLD) {
       return {
         ok: true,
@@ -398,10 +399,12 @@ async function consultarExequaturSNS({ nombreCompleto }) {
     return {
       ok: true,
       exists: false,
+      suggestion: best.score >= NEAR_MATCH_THRESHOLD ? best.doctor : null,
       match: {
         score: best.score,
         method: best.method,
         threshold: THRESHOLD,
+        candidateName: best.doctor?.nombre || null,
       },
     };
   } catch (err) {
