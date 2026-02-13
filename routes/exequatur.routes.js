@@ -10,13 +10,30 @@ const limiter = rateLimit({
   max: 10,
 });
 
+// =======================================
+// ✅ VALIDAR EXEQUÁTUR SOLO POR NOMBRE
+// Endpoint: POST /api/validar-exequatur
+// =======================================
 router.post("/validar-exequatur", limiter, async (req, res) => {
-  const { cedula, nombres, apellidos } = req.body;
+  const { nombres, apellidos, nombreCompleto } = req.body;
 
+  // ✅ Construir nombre completo
+  const fullName =
+    nombreCompleto ||
+    `${nombres || ""} ${apellidos || ""}`.replace(/\s+/g, " ").trim();
+
+  if (!fullName || fullName.length < 4) {
+    return res.status(400).json({
+      success: false,
+      message: "Debes enviar el nombre completo para validar Exequátur.",
+    });
+  }
+
+  // ✅ CONSULTA SOLO POR NOMBRE
   const result = await consultarExequaturSNS({
-    cedula,
-    nombres,
-    apellidos,
+    cedula: "", // 🚫 ya no se usa
+    nombres: fullName,
+    apellidos: "",
   });
 
   if (!result.ok) {
@@ -33,12 +50,15 @@ router.post("/validar-exequatur", limiter, async (req, res) => {
   });
 });
 
+// =======================================
+// GET INFO
+// =======================================
 router.get("/validar-exequatur", (req, res) => {
   res.json({
     success: true,
-    message: "Usa POST /api/validar-exequatur con JSON: { cedula } o { nombres, apellidos }",
+    message:
+      "Usa POST /api/validar-exequatur con JSON: { nombreCompleto: 'Juan Perez' }",
   });
 });
-
 
 module.exports = router;
