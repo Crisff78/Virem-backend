@@ -11,7 +11,7 @@ const router = express.Router();
 router.get('/', requireAuth, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT medicoid, nombres, apellidos, fechanacimiento, genero, cedula, telefono, especialidad, fecharegistro
+      `SELECT medicoid, nombrecompleto AS "nombreCompleto", fechanacimiento, genero, cedula, telefono, especialidad, fecharegistro
        FROM medico
        ORDER BY medicoid DESC`
     );
@@ -29,7 +29,7 @@ router.get('/', requireAuth, async (req, res) => {
 router.get('/:id', requireAuth, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT medicoid, nombres, apellidos, fechanacimiento, genero, cedula, telefono, especialidad, fecharegistro
+      `SELECT medicoid, nombrecompleto AS "nombreCompleto", fechanacimiento, genero, cedula, telefono, especialidad, fecharegistro
        FROM medico
        WHERE medicoid = $1`,
       [req.params.id]
@@ -51,20 +51,20 @@ router.get('/:id', requireAuth, async (req, res) => {
 // Endpoint: POST /api/medicos
 // ===============================
 router.post('/', requireAuth, async (req, res) => {
-  const { nombres, apellidos, fechanacimiento, genero, cedula, telefono, especialidad } = req.body;
+  const { nombreCompleto, fechanacimiento, genero, cedula, telefono, especialidad } = req.body;
+  const nombreCompletoTrim = String(nombreCompleto || '').trim();
 
-  if (!nombres || !apellidos || !fechanacimiento || !genero || !cedula || !telefono) {
+  if (!nombreCompletoTrim || !fechanacimiento || !genero || !cedula || !telefono) {
     return res.status(400).json({ success: false, message: 'Faltan campos obligatorios.' });
   }
 
   try {
     const result = await pool.query(
-      `INSERT INTO medico (nombres, apellidos, fechanacimiento, genero, cedula, telefono, especialidad, fecharegistro)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
-       RETURNING medicoid, nombres, apellidos, fechanacimiento, genero, cedula, telefono, especialidad, fecharegistro`,
+      `INSERT INTO medico (nombrecompleto, fechanacimiento, genero, cedula, telefono, especialidad, fecharegistro)
+       VALUES ($1,$2,$3,$4,$5,$6,NOW())
+       RETURNING medicoid, nombrecompleto AS "nombreCompleto", fechanacimiento, genero, cedula, telefono, especialidad, fecharegistro`,
       [
-        String(nombres).trim(),
-        String(apellidos).trim(),
+        nombreCompletoTrim,
         String(fechanacimiento).trim(),
         String(genero).trim(),
         String(cedula).trim(),
@@ -85,27 +85,26 @@ router.post('/', requireAuth, async (req, res) => {
 // Endpoint: PUT /api/medicos/:id
 // ===============================
 router.put('/:id', requireAuth, async (req, res) => {
-  const { nombres, apellidos, fechanacimiento, genero, cedula, telefono, especialidad } = req.body;
+  const { nombreCompleto, fechanacimiento, genero, cedula, telefono, especialidad } = req.body;
+  const nombreCompletoTrim = String(nombreCompleto || '').trim();
 
-  if (!nombres || !apellidos || !fechanacimiento || !genero || !cedula || !telefono) {
+  if (!nombreCompletoTrim || !fechanacimiento || !genero || !cedula || !telefono) {
     return res.status(400).json({ success: false, message: 'Faltan campos obligatorios.' });
   }
 
   try {
     const result = await pool.query(
       `UPDATE medico
-       SET nombres = $1,
-           apellidos = $2,
-           fechanacimiento = $3,
-           genero = $4,
-           cedula = $5,
-           telefono = $6,
-           especialidad = $7
-       WHERE medicoid = $8
-       RETURNING medicoid, nombres, apellidos, fechanacimiento, genero, cedula, telefono, especialidad, fecharegistro`,
+       SET nombrecompleto = $1,
+           fechanacimiento = $2,
+           genero = $3,
+           cedula = $4,
+           telefono = $5,
+           especialidad = $6
+       WHERE medicoid = $7
+       RETURNING medicoid, nombrecompleto AS "nombreCompleto", fechanacimiento, genero, cedula, telefono, especialidad, fecharegistro`,
       [
-        String(nombres).trim(),
-        String(apellidos).trim(),
+        nombreCompletoTrim,
         String(fechanacimiento).trim(),
         String(genero).trim(),
         String(cedula).trim(),
