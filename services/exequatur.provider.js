@@ -23,6 +23,10 @@ function normalizeText(value) {
     .trim();
 }
 
+function compactText(value) {
+  return normalizeText(value).replace(/\s+/g, "");
+}
+
 function normalizeForComparison(value) {
   return normalizeText(value)
     .split(" ")
@@ -73,6 +77,8 @@ function scoreNameMatch(inputName, candidateName) {
 
   const inputTokens = tokensFromName(inputNorm, false);
   const candidateTokens = tokensFromName(candidateNorm, false);
+  const longInputTokens = inputTokens.filter((token) => token.length >= 3);
+  const longCandidateTokens = candidateTokens.filter((token) => token.length >= 3);
   const inputSet = new Set(inputTokens);
   const candidateSet = new Set(candidateTokens);
 
@@ -86,6 +92,26 @@ function scoreNameMatch(inputName, candidateName) {
   const includes =
     candidateNorm.includes(inputNorm) || inputNorm.includes(candidateNorm) ? 1 : 0;
 
+  const compactIncludes = (() => {
+    const inputCompact = compactText(inputNorm);
+    const candidateCompact = compactText(candidateNorm);
+    return inputCompact && candidateCompact &&
+      (candidateCompact.includes(inputCompact) || inputCompact.includes(candidateCompact))
+      ? 1
+      : 0;
+  })();
+
+  const tokenIncludes = (() => {
+    if (!longInputTokens.length || !longCandidateTokens.length) return 0;
+    const inputInsideCandidate = longInputTokens.every((token) =>
+      longCandidateTokens.some((cand) => cand.includes(token) || token.includes(cand)),
+    );
+    const candidateInsideInput = longCandidateTokens.every((token) =>
+      longInputTokens.some((inp) => inp.includes(token) || token.includes(inp)),
+    );
+    return inputInsideCandidate || candidateInsideInput ? 1 : 0;
+  })();
+
   const inputSorted = [...inputTokens].sort().join(" ");
   const candidateSorted = [...candidateTokens].sort().join(" ");
   const sortedIncludes =
@@ -96,11 +122,19 @@ function scoreNameMatch(inputName, candidateName) {
   const similarityScore = 1 - distance / maxLen;
 
   const score = Number(
-    (tokenScore * 0.65 + includes * 0.1 + sortedIncludes * 0.15 + similarityScore * 0.1).toFixed(4),
+    (
+      tokenScore * 0.4 +
+      includes * 0.1 +
+      compactIncludes * 0.1 +
+      tokenIncludes * 0.3 +
+      similarityScore * 0.1
+    ).toFixed(4),
   );
 
   const methods = ["token_overlap", "levenshtein_ratio"];
   if (includes) methods.push("includes");
+  if (compactIncludes) methods.push("compact_includes");
+  if (tokenIncludes) methods.push("token_includes");
   if (sortedIncludes) methods.push("sorted_includes");
 
   return {
@@ -112,6 +146,8 @@ function scoreNameMatch(inputName, candidateName) {
       inputCoverage,
       candidateCoverage,
       includes,
+      compactIncludes,
+      tokenIncludes,
       sortedIncludes,
       similarityScore,
     },
@@ -128,7 +164,6 @@ function normalizeDoctorRecord(record) {
     folio: record.folio || "",
     libro: record.libro || "",
     no_decreto: record.no_decreto || record.decreto || "",
-    cedula: record.cedula || "",
   };
 }
 
@@ -188,7 +223,6 @@ async function parseTableRows(page) {
             folio: "",
             libro: "",
             no_decreto: "",
-            cedula: "",
           };
 
           if (headers.length === cols.length) {
@@ -205,7 +239,6 @@ async function parseTableRows(page) {
               else if (header.includes("folio")) data.folio = value;
               else if (header.includes("libro")) data.libro = value;
               else if (header.includes("decreto")) data.no_decreto = value;
-              else if (header.includes("cedula")) data.cedula = value;
             });
           }
 
@@ -262,10 +295,7 @@ async function consultarExequaturSNS({ nombreCompleto }) {
     const inputCandidates = [
       'input[type="search"]',
       'input[placeholder*="Buscar" i]',
-      'input[placeholder*="Cédula" i]',
-      'input[placeholder*="Cedula" i]',
       'input[name*="search" i]',
-      'input[name*="cedula" i]',
       'input[name*="nombre" i]',
       "input[type='text']",
     ];
@@ -351,7 +381,7 @@ async function consultarExequaturSNS({ nombreCompleto }) {
 
     debugLog("Mejor score:", best.score, "Método:", best.method);
 
-    const THRESHOLD = 0.75;
+    const THRESHOLD = 0.6;
     if (best.score >= THRESHOLD) {
       return {
         ok: true,
