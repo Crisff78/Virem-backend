@@ -11,22 +11,21 @@ const limiter = rateLimit({
 });
 
 // =======================================
-// ✅ VALIDAR EXEQUÁTUR POR CÉDULA + NOMBRE COMPLETO
+// ✅ VALIDAR EXEQUÁTUR SOLO POR NOMBRE COMPLETO
 // Endpoint: POST /api/validar-exequatur
 // =======================================
 router.post("/validar-exequatur", limiter, async (req, res) => {
-  const { cedula, nombreCompleto } = req.body;
+  const { nombreCompleto } = req.body;
   const nombre = String(nombreCompleto || "").replace(/\s+/g, " ").trim();
 
-  if (!cedula && !nombre) {
+  if (!nombre) {
     return res.status(400).json({
       success: false,
-      message: "Debes enviar cédula o nombreCompleto para validar exequátur.",
+      message: "Debes enviar nombreCompleto para validar exequátur.",
     });
   }
 
   const result = await consultarExequaturSNS({
-    cedula: String(cedula || "").trim(),
     nombreCompleto: nombre,
   });
 
@@ -37,10 +36,19 @@ router.post("/validar-exequatur", limiter, async (req, res) => {
     });
   }
 
+  if (!result.exists) {
+    return res.json({
+      success: true,
+      exists: false,
+      message: "No se encontró coincidencia en el Exequátur del SNS.",
+      match: result.match || null,
+    });
+  }
+
   return res.json({
     success: true,
-    exists: result.exists,
-    doctor: result.exists ? result.doctor : null,
+    exists: true,
+    doctor: result.doctor,
     match: result.match || null,
   });
 });
@@ -52,7 +60,7 @@ router.get("/validar-exequatur", (req, res) => {
   res.json({
     success: true,
     message:
-      "Usa POST /api/validar-exequatur con JSON: { cedula: '00112345678', nombreCompleto: 'Juan Perez' }",
+      "Usa POST /api/validar-exequatur con JSON: { nombreCompleto: 'Esperanza Morales de la Cruz' }",
   });
 });
 

@@ -23,6 +23,14 @@ function normalizeText(value) {
     .trim();
 }
 
+function normalizeForComparison(value) {
+  return normalizeText(value)
+    .split(" ")
+    .filter(Boolean)
+    .filter((token) => !PARTICLES.has(token))
+    .join(" ");
+}
+
 function tokensFromName(name, removeParticles = false) {
   const tokens = normalizeText(name).split(" ").filter(Boolean);
   if (!removeParticles) return tokens;
@@ -56,38 +64,57 @@ function levenshtein(a, b) {
 }
 
 function scoreNameMatch(inputName, candidateName) {
-  const inputNorm = normalizeText(inputName);
-  const candidateNorm = normalizeText(candidateName);
+  const inputNorm = normalizeForComparison(inputName);
+  const candidateNorm = normalizeForComparison(candidateName);
 
   if (!inputNorm || !candidateNorm) {
     return { score: 0, method: "empty" };
   }
 
-  const inputTokens = tokensFromName(inputNorm, true);
-  const candidateTokens = tokensFromName(candidateNorm, true);
+  const inputTokens = tokensFromName(inputNorm, false);
+  const candidateTokens = tokensFromName(candidateNorm, false);
   const inputSet = new Set(inputTokens);
   const candidateSet = new Set(candidateTokens);
 
   const intersection = [...inputSet].filter((token) => candidateSet.has(token)).length;
   const union = new Set([...inputSet, ...candidateSet]).size || 1;
-  const scoreA = intersection / union;
+  const jaccardScore = intersection / union;
+  const inputCoverage = inputSet.size ? intersection / inputSet.size : 0;
+  const candidateCoverage = candidateSet.size ? intersection / candidateSet.size : 0;
+  const tokenScore = (jaccardScore * 0.5) + (inputCoverage * 0.35) + (candidateCoverage * 0.15);
 
   const includes =
     candidateNorm.includes(inputNorm) || inputNorm.includes(candidateNorm) ? 1 : 0;
 
+  const inputSorted = [...inputTokens].sort().join(" ");
+  const candidateSorted = [...candidateTokens].sort().join(" ");
+  const sortedIncludes =
+    candidateSorted.includes(inputSorted) || inputSorted.includes(candidateSorted) ? 1 : 0;
+
   const distance = levenshtein(inputNorm, candidateNorm);
   const maxLen = Math.max(inputNorm.length, candidateNorm.length) || 1;
-  const scoreC = 1 - distance / maxLen;
+  const similarityScore = 1 - distance / maxLen;
 
-  const score = Number((scoreA * 0.55 + includes * 0.2 + scoreC * 0.25).toFixed(4));
+  const score = Number(
+    (tokenScore * 0.65 + includes * 0.1 + sortedIncludes * 0.15 + similarityScore * 0.1).toFixed(4),
+  );
 
   const methods = ["token_overlap", "levenshtein_ratio"];
   if (includes) methods.push("includes");
+  if (sortedIncludes) methods.push("sorted_includes");
 
   return {
     score,
     method: methods.join("+"),
-    breakdown: { scoreA, scoreB: includes, scoreC },
+    breakdown: {
+      tokenScore,
+      jaccardScore,
+      inputCoverage,
+      candidateCoverage,
+      includes,
+      sortedIncludes,
+      similarityScore,
+    },
   };
 }
 
@@ -105,19 +132,12 @@ function normalizeDoctorRecord(record) {
   };
 }
 
-function findBestDoctorMatch(rows, nombreCompleto, cedulaDigits) {
+function findBestDoctorMatch(rows, nombreCompleto) {
   const scored = rows
     .map((row) => {
       const doctor = normalizeDoctorRecord(row);
       const nameForMatch = doctor.nombre || row.rawName || "";
       const match = scoreNameMatch(nombreCompleto, nameForMatch);
-
-      if (cedulaDigits && doctor.cedula) {
-        const rowCedulaDigits = String(doctor.cedula).replace(/\D/g, "");
-        if (rowCedulaDigits && rowCedulaDigits !== cedulaDigits) {
-          return { doctor, score: 0, method: `${match.method}+cedula_mismatch` };
-        }
-      }
 
       return {
         doctor,
@@ -211,29 +231,26 @@ async function parseTableRows(page) {
   });
 }
 
-async function consultarExequaturSNS({ cedula, nombreCompleto, nombres, apellidos }) {
-  const cedulaDigits = String(cedula || "").replace(/\D/g, "");
-  const fullName = String(
-    nombreCompleto || `${String(nombres || "").trim()} ${String(apellidos || "").trim()}`,
-  )
+async function consultarExequaturSNS({ nombreCompleto }) {
+  const fullName = String(nombreCompleto || "")
     .replace(/\s+/g, " ")
     .trim();
 
-  if (!cedulaDigits && !fullName) {
+  if (!fullName) {
     return {
       ok: false,
-      reason: "Debes enviar cédula o nombreCompleto para validar Exequátur.",
+      reason: "Debes enviar nombreCompleto para validar Exequátur.",
     };
   }
 
-  const query = cedulaDigits || fullName;
+  const query = fullName;
   let browser;
 
   try {
     browser = await chromium.launch({ headless: true });
     const page = await browser.newPage();
 
-    debugLog("Query SNS:", cedulaDigits ? "[cedula]" : normalizeText(fullName));
+    debugLog("Query SNS (nombreCompleto):", normalizeText(fullName));
 
     await page.goto(SNS_URL, {
       waitUntil: "domcontentloaded",
@@ -327,7 +344,7 @@ async function consultarExequaturSNS({ cedula, nombreCompleto, nombres, apellido
       return { ok: true, exists: false };
     }
 
-    const best = findBestDoctorMatch(rows, fullName, cedulaDigits);
+    const best = findBestDoctorMatch(rows, fullName);
     if (!best) {
       return { ok: true, exists: false };
     }
