@@ -14,10 +14,11 @@ const limiter = rateLimit({
 // ✅ VALIDAR EXEQUÁTUR SOLO POR NOMBRE COMPLETO
 // Endpoint: POST /api/validar-exequatur
 // =======================================
-router.post("/validar-exequatur", limiter, async (req, res) => {
+router.post("/validar-exequatur", async (req, res) => {
   const { nombreCompleto } = req.body;
+  console.log("Validando exequátur para:", nombreCompleto);
   const nombre = String(nombreCompleto || "").replace(/\s+/g, " ").trim();
-
+console.log("Nombre procesado:", nombre);
   if (!nombre) {
     return res.status(400).json({
       success: false,
@@ -28,7 +29,7 @@ router.post("/validar-exequatur", limiter, async (req, res) => {
   const result = await consultarExequaturSNS({
     nombreCompleto: nombre,
   });
-
+console.log("Resultado de consulta:", result);
   if (!result.ok) {
     return res.status(400).json({
       success: false,
@@ -56,12 +57,12 @@ router.post("/validar-exequatur", limiter, async (req, res) => {
 // =======================================
 // GET INFO
 // =======================================
-router.get("/validar-exequatur", (req, res) => {
-  res.json({
-    success: true,
-    message:
-      "Usa POST /api/validar-exequatur con JSON: { nombreCompleto: 'Esperanza Morales de la Cruz' }",
-  });
-});
+// router.get("/validar-exequatur", (req, res) => {
+//   res.json({
+//     success: true,
+//     message:
+//       "Usa POST /api/validar-exequatur con JSON: { nombreCompleto: 'Esperanza Morales de la Cruz' }",
+//   });
+// });
 
 module.exports = router;
