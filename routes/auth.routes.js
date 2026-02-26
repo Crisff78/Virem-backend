@@ -215,7 +215,8 @@ router.post("/register-medico", async (req, res) => {
     }
 
     const passwordhash = await bcrypt.hash(String(password), 10);
-    const rolid = Number(process.env.DEFAULT_MEDICO_ROLID || process.env.DEFAULT_ROLID || 2);
+    // Para medicos, el default debe ser rol medico (2) si no se define DEFAULT_MEDICO_ROLID.
+    const rolid = Number(process.env.DEFAULT_MEDICO_ROLID || 2);
     const activo = String(process.env.DEFAULT_ACTIVO || "true") === "true";
 
     const insertUsuario = await client.query(
