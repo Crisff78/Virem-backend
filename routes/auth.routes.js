@@ -24,6 +24,10 @@ function toSqlDate(fecha) {
   return `${yyyy}-${mm.padStart(2, "0")}-${dd.padStart(2, "0")}`;
 }
 
+function normalizePhone(rawPhone) {
+  return String(rawPhone || "").replace(/\D/g, "").slice(0, 15);
+}
+
 /**
  * ===============================
  * POST /api/auth/register
@@ -143,6 +147,136 @@ router.post("/register", async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Error interno registrando paciente.",
+      error: err?.message || String(err),
+    });
+  } finally {
+    client.release();
+  }
+});
+
+/**
+ * ===============================
+ * POST /api/auth/register-medico
+ * Registra MEDICO + USUARIO
+ * ===============================
+ */
+router.post("/register-medico", async (req, res) => {
+  const {
+    nombreCompleto,
+    fechanacimiento,
+    genero,
+    especialidad,
+    cedula,
+    telefono,
+    email,
+    password,
+  } = req.body;
+
+  if (
+    !nombreCompleto ||
+    !fechanacimiento ||
+    !genero ||
+    !especialidad ||
+    !cedula ||
+    !telefono ||
+    !email ||
+    !password
+  ) {
+    return res.status(400).json({
+      success: false,
+      message:
+        "Faltan campos obligatorios (nombreCompleto, fechanacimiento, genero, especialidad, cedula, telefono, email, password).",
+    });
+  }
+
+  const client = await pool.connect();
+
+  try {
+    const normalizedEmail = String(email).toLowerCase().trim();
+    const fechaSQL = toSqlDate(fechanacimiento);
+    const nombreCompletoTrim = String(nombreCompleto).replace(/\s+/g, " ").trim();
+    const cedulaClean = String(cedula).replace(/\D/g, "").slice(0, 11);
+    const telefonoClean = normalizePhone(telefono);
+    const especialidadTrim = String(especialidad).trim();
+
+    await client.query("BEGIN");
+
+    const existing = await client.query(
+      "SELECT usuarioid FROM usuario WHERE email = $1",
+      [normalizedEmail]
+    );
+
+    if (existing.rows.length > 0) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({
+        success: false,
+        message: "Ese correo ya está registrado.",
+      });
+    }
+
+    const passwordhash = await bcrypt.hash(String(password), 10);
+    const rolid = Number(process.env.DEFAULT_MEDICO_ROLID || process.env.DEFAULT_ROLID || 2);
+    const activo = String(process.env.DEFAULT_ACTIVO || "true") === "true";
+
+    const insertUsuario = await client.query(
+      `INSERT INTO usuario (rolid, email, passwordhash, fechacreacion, activo)
+       VALUES ($1,$2,$3,NOW(),$4)
+       RETURNING usuarioid`,
+      [rolid, normalizedEmail, passwordhash, activo]
+    );
+
+    const usuarioid = insertUsuario.rows[0].usuarioid;
+
+    let medicoRow;
+    try {
+      const withId = await client.query(
+        `INSERT INTO medico (medicoid, nombrecompleto, fechanacimiento, genero, cedula, telefono, especialidad, fecharegistro)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
+         RETURNING medicoid, nombrecompleto AS "nombreCompleto", fechanacimiento, genero, cedula, telefono, especialidad, fecharegistro`,
+        [
+          usuarioid,
+          nombreCompletoTrim,
+          fechaSQL,
+          String(genero).trim(),
+          cedulaClean,
+          telefonoClean,
+          especialidadTrim,
+        ]
+      );
+      medicoRow = withId.rows[0];
+    } catch (e) {
+      const withoutId = await client.query(
+        `INSERT INTO medico (nombrecompleto, fechanacimiento, genero, cedula, telefono, especialidad, fecharegistro)
+         VALUES ($1,$2,$3,$4,$5,$6,NOW())
+         RETURNING medicoid, nombrecompleto AS "nombreCompleto", fechanacimiento, genero, cedula, telefono, especialidad, fecharegistro`,
+        [
+          nombreCompletoTrim,
+          fechaSQL,
+          String(genero).trim(),
+          cedulaClean,
+          telefonoClean,
+          especialidadTrim,
+        ]
+      );
+      medicoRow = withoutId.rows[0];
+    }
+
+    await client.query("COMMIT");
+
+    return res.status(201).json({
+      success: true,
+      message: "Médico registrado correctamente.",
+      medico: medicoRow,
+      usuarioid,
+    });
+  } catch (err) {
+    try {
+      await client.query("ROLLBACK");
+    } catch (_) {}
+
+    return res.status(500).json({
+      success: false,
+      message: "Error interno registrando médico.",
       error: err?.message || String(err),
     });
   } finally {
