@@ -1,12 +1,22 @@
 const express = require("express");
 const cors = require("cors");
 require("dotenv").config();
+const pool = require("./config/db");
 
 const app = express();
 
 // Middlewares
 app.use(cors());
 app.use(express.json());
+
+pool.query("SELECT NOW()")
+  .then(res => {
+    console.log("✅ Conectado a Supabase correctamente");
+    console.log(res.rows);
+  })
+  .catch(err => {
+    console.error("❌ Error conectando a Supabase:", err.message);
+  });
 
 // Ruta raíz
 app.get("/", (req, res) => {
