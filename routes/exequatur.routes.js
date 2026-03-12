@@ -11,58 +11,66 @@ const limiter = rateLimit({
 });
 
 // =======================================
-// ✅ VALIDAR EXEQUÁTUR SOLO POR NOMBRE COMPLETO
+// VALIDAR EXEQUATUR SOLO POR NOMBRE COMPLETO
 // Endpoint: POST /api/validar-exequatur
 // =======================================
-router.post("/validar-exequatur", async (req, res) => {
-  const { nombreCompleto } = req.body;
-  console.log("Validando exequátur para:", nombreCompleto);
+router.post("/validar-exequatur", limiter, async (req, res) => {
+  const { nombreCompleto } = req.body || {};
   const nombre = String(nombreCompleto || "").replace(/\s+/g, " ").trim();
-console.log("Nombre procesado:", nombre);
+
   if (!nombre) {
     return res.status(400).json({
       success: false,
-      message: "Debes enviar nombreCompleto para validar exequátur.",
+      message: "Debes enviar nombreCompleto para validar exequatur.",
     });
   }
+
+  console.log(`[SNS] Validando exequatur para: ${nombre}`);
 
   const result = await consultarExequaturSNS({
     nombreCompleto: nombre,
   });
-console.log("Resultado de consulta:", result);
+
   if (!result.ok) {
-    return res.status(400).json({
+    console.log("[SNS] Consulta fallida:", {
+      nombre,
+      serviceUnavailable: Boolean(result.serviceUnavailable),
+      reason: result.reason,
+      fastFailCached: Boolean(result.fastFailCached),
+    });
+
+    const statusCode = result.serviceUnavailable ? 503 : 400;
+    return res.status(statusCode).json({
       success: false,
+      serviceUnavailable: Boolean(result.serviceUnavailable),
       message: result.reason,
     });
   }
 
   if (!result.exists) {
+    console.log(`[SNS] No se encontraron coincidencias para: ${nombre}`);
+
     return res.json({
       success: true,
       exists: false,
-      message: "No se encontró coincidencia en el Exequátur del SNS.",
+      message: "No se encontro coincidencia en el Exequatur del SNS.",
       match: result.match || null,
     });
   }
 
+  const records = Array.isArray(result.data) ? result.data : [];
+  const doctor = records.length > 0 ? records[0] : null;
+
+  console.log(`[SNS] Coincidencias encontradas para "${nombre}": ${records.length}`);
+  console.log("[SNS] Datos encontrados:", records);
+
   return res.json({
     success: true,
     exists: true,
-    doctor: result.doctor,
+    doctor,
+    records,
     match: result.match || null,
   });
 });
-
-// =======================================
-// GET INFO
-// =======================================
-// router.get("/validar-exequatur", (req, res) => {
-//   res.json({
-//     success: true,
-//     message:
-//       "Usa POST /api/validar-exequatur con JSON: { nombreCompleto: 'Esperanza Morales de la Cruz' }",
-//   });
-// });
 
 module.exports = router;
