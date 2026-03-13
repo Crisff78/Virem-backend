@@ -69,6 +69,29 @@ function clampInt(value, min, max, fallback) {
   return Math.min(max, Math.max(min, parsed));
 }
 
+function toSqlDate(rawValue) {
+  const raw = String(rawValue || "").trim();
+  if (!raw) return "";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+  const isoPrefix = raw.match(/^(\d{4}-\d{2}-\d{2})[T\s]/);
+  if (isoPrefix?.[1]) return isoPrefix[1];
+
+  const parts = raw.split("/");
+  if (parts.length === 3) {
+    const [dd, mm, yyyy] = parts;
+    if (/^\d+$/.test(dd) && /^\d+$/.test(mm) && /^\d+$/.test(yyyy)) {
+      return `${yyyy}-${mm.padStart(2, "0")}-${dd.padStart(2, "0")}`;
+    }
+  }
+
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) return "";
+  const yyyy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const dd = String(date.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
 async function getMedicoByUsuarioId(client, usuarioid, userCreatedAt) {
   const direct = await client.query(
     `SELECT
@@ -584,7 +607,7 @@ router.put('/me/profile', requireAuth, async (req, res) => {
     return res.status(400).json({
       success: false,
       message:
-        'fotoUrl debe iniciar con http://, https://, file://, blob: o data:image/.',
+        'fotoUrl debe iniciar con http://, https://, file:// o data:image/.',
     });
   }
 
@@ -602,6 +625,308 @@ router.put('/me/profile', requireAuth, async (req, res) => {
     return res
       .status(500)
       .json({ success: false, message: 'Error interno guardando foto de perfil.' });
+  }
+});
+
+// ===============================
+// API: Perfil de paciente autenticado (core + extras)
+// Endpoint: GET /api/users/me/paciente-profile
+// ===============================
+router.get('/me/paciente-profile', requireAuth, async (req, res) => {
+  let client;
+  try {
+    client = await pool.connect();
+
+    const userResult = await client.query(
+      `SELECT usuarioid, rolid, email, activo, fechacreacion
+       FROM usuario
+       WHERE usuarioid = $1
+       LIMIT 1`,
+      [req.user.usuarioid]
+    );
+
+    if (!userResult.rows.length) {
+      return res.status(404).json({ success: false, message: 'Usuario no encontrado.' });
+    }
+
+    const user = userResult.rows[0];
+    if (!Boolean(user.activo)) {
+      return res.status(403).json({ success: false, message: 'Usuario inactivo.' });
+    }
+    if (Number(user.rolid) !== PACIENTE_ROLE_ID) {
+      return res.status(403).json({
+        success: false,
+        message: 'Este endpoint es exclusivo para cuentas de paciente.',
+      });
+    }
+
+    const paciente = await getPacienteByUsuarioId(client, user.usuarioid, user.fechacreacion);
+    if (!paciente) {
+      return res.status(404).json({
+        success: false,
+        message: 'No se encontro el perfil de paciente asociado.',
+      });
+    }
+
+    const profileDb = await getUserProfileById(client, user.usuarioid);
+    const meta = profileDb?.meta && typeof profileDb.meta === 'object' ? profileDb.meta : {};
+
+    return res.json({
+      success: true,
+      profile: {
+        usuarioid: user.usuarioid,
+        pacienteid: paciente.pacienteid,
+        email: user.email,
+        nombres: paciente.nombres || '',
+        apellidos: paciente.apellidos || '',
+        fechanacimiento: paciente.fechanacimiento || null,
+        genero: paciente.genero || '',
+        cedula: paciente.cedula || '',
+        telefono: paciente.telefono || '',
+        fotoUrl: profileDb?.fotoUrl || null,
+        direccion: String(meta.direccion || ''),
+        tipoSangre: String(meta.tipoSangre || ''),
+        alergias: String(meta.alergias || ''),
+        medicamentos: String(meta.medicamentos || ''),
+        antecedentes: String(meta.antecedentes || ''),
+        contactoEmergenciaNombre: String(meta.contactoEmergenciaNombre || ''),
+        contactoEmergenciaTelefono: String(meta.contactoEmergenciaTelefono || ''),
+        contactoEmergenciaParentesco: String(meta.contactoEmergenciaParentesco || ''),
+        recibirEmail: Boolean(
+          Object.prototype.hasOwnProperty.call(meta, 'recibirEmail') ? meta.recibirEmail : true
+        ),
+        recibirSMS: Boolean(
+          Object.prototype.hasOwnProperty.call(meta, 'recibirSMS') ? meta.recibirSMS : true
+        ),
+        compartirHistorial: Boolean(meta.compartirHistorial || false),
+      },
+    });
+  } catch (err) {
+    console.error('Error GET /users/me/paciente-profile:', err);
+    return res
+      .status(500)
+      .json({ success: false, message: 'Error interno cargando perfil de paciente.' });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+// ===============================
+// API: Actualizar perfil de paciente autenticado
+// Endpoint: PUT /api/users/me/paciente-profile
+// ===============================
+router.put('/me/paciente-profile', requireAuth, async (req, res) => {
+  const body = req.body || {};
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('BEGIN');
+
+    const userResult = await client.query(
+      `SELECT usuarioid, rolid, email, activo, fechacreacion
+       FROM usuario
+       WHERE usuarioid = $1
+       LIMIT 1`,
+      [req.user.usuarioid]
+    );
+
+    if (!userResult.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ success: false, message: 'Usuario no encontrado.' });
+    }
+
+    const user = userResult.rows[0];
+    if (!Boolean(user.activo)) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ success: false, message: 'Usuario inactivo.' });
+    }
+    if (Number(user.rolid) !== PACIENTE_ROLE_ID) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({
+        success: false,
+        message: 'Este endpoint es exclusivo para cuentas de paciente.',
+      });
+    }
+
+    const paciente = await getPacienteByUsuarioId(client, user.usuarioid, user.fechacreacion);
+    if (!paciente) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({
+        success: false,
+        message: 'No se encontro el perfil de paciente asociado.',
+      });
+    }
+
+    const nextNombres = String(
+      Object.prototype.hasOwnProperty.call(body, 'nombres') ? body.nombres : paciente.nombres
+    )
+      .replace(/\s+/g, ' ')
+      .trim();
+    const nextApellidos = String(
+      Object.prototype.hasOwnProperty.call(body, 'apellidos') ? body.apellidos : paciente.apellidos
+    )
+      .replace(/\s+/g, ' ')
+      .trim();
+    const nextGenero = String(
+      Object.prototype.hasOwnProperty.call(body, 'genero') ? body.genero : paciente.genero
+    )
+      .replace(/\s+/g, ' ')
+      .trim();
+    const nextCedula = String(
+      Object.prototype.hasOwnProperty.call(body, 'cedula') ? body.cedula : paciente.cedula
+    )
+      .replace(/\D/g, '')
+      .slice(0, 11);
+    const nextTelefono = String(
+      Object.prototype.hasOwnProperty.call(body, 'telefono') ? body.telefono : paciente.telefono
+    )
+      .replace(/\D/g, '')
+      .slice(0, 15);
+    const nextFechaNacimiento = toSqlDate(
+      Object.prototype.hasOwnProperty.call(body, 'fechanacimiento')
+        ? body.fechanacimiento
+        : paciente.fechanacimiento
+    );
+
+    if (!nextNombres || !nextApellidos || !nextGenero || !nextCedula || !nextTelefono || !nextFechaNacimiento) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        success: false,
+        message: 'nombres, apellidos, fechanacimiento, genero, cedula y telefono son obligatorios.',
+      });
+    }
+
+    const emailProvided = Object.prototype.hasOwnProperty.call(body, 'email');
+    let nextEmail = String(user.email || '').toLowerCase().trim();
+    if (emailProvided) {
+      nextEmail = String(body.email || '').toLowerCase().trim();
+      if (!nextEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(nextEmail)) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ success: false, message: 'Email invalido.' });
+      }
+
+      const existing = await client.query(
+        `SELECT usuarioid
+         FROM usuario
+         WHERE email = $1 AND usuarioid <> $2
+         LIMIT 1`,
+        [nextEmail, user.usuarioid]
+      );
+      if (existing.rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ success: false, message: 'Ese correo ya esta registrado.' });
+      }
+
+      await client.query(
+        `UPDATE usuario
+         SET email = $1
+         WHERE usuarioid = $2`,
+        [nextEmail, user.usuarioid]
+      );
+    }
+
+    const updatePaciente = await client.query(
+      `UPDATE paciente
+       SET nombres = $1,
+           apellidos = $2,
+           fechanacimiento = $3,
+           genero = $4,
+           cedula = $5,
+           telefono = $6
+       WHERE pacienteid = $7
+       RETURNING pacienteid, nombres, apellidos, fechanacimiento, genero, cedula, telefono`,
+      [
+        nextNombres,
+        nextApellidos,
+        nextFechaNacimiento,
+        nextGenero,
+        nextCedula,
+        nextTelefono,
+        Number(paciente.pacienteid),
+      ]
+    );
+
+    const updatedPaciente = updatePaciente.rows[0];
+
+    const currentProfile = await getUserProfileById(client, user.usuarioid);
+    const currentMeta =
+      currentProfile?.meta && typeof currentProfile.meta === 'object' ? currentProfile.meta : {};
+
+    const mergedMeta = {
+      ...currentMeta,
+      direccion: String(body.direccion ?? currentMeta.direccion ?? '').trim(),
+      tipoSangre: String(body.tipoSangre ?? currentMeta.tipoSangre ?? '').trim(),
+      alergias: String(body.alergias ?? currentMeta.alergias ?? '').trim(),
+      medicamentos: String(body.medicamentos ?? currentMeta.medicamentos ?? '').trim(),
+      antecedentes: String(body.antecedentes ?? currentMeta.antecedentes ?? '').trim(),
+      contactoEmergenciaNombre: String(
+        body.contactoEmergenciaNombre ?? currentMeta.contactoEmergenciaNombre ?? ''
+      ).trim(),
+      contactoEmergenciaTelefono: String(
+        body.contactoEmergenciaTelefono ?? currentMeta.contactoEmergenciaTelefono ?? ''
+      )
+        .replace(/\D/g, '')
+        .slice(0, 15),
+      contactoEmergenciaParentesco: String(
+        body.contactoEmergenciaParentesco ?? currentMeta.contactoEmergenciaParentesco ?? ''
+      ).trim(),
+      recibirEmail:
+        Object.prototype.hasOwnProperty.call(body, 'recibirEmail')
+          ? Boolean(body.recibirEmail)
+          : Boolean(
+              Object.prototype.hasOwnProperty.call(currentMeta, 'recibirEmail')
+                ? currentMeta.recibirEmail
+                : true
+            ),
+      recibirSMS:
+        Object.prototype.hasOwnProperty.call(body, 'recibirSMS')
+          ? Boolean(body.recibirSMS)
+          : Boolean(
+              Object.prototype.hasOwnProperty.call(currentMeta, 'recibirSMS')
+                ? currentMeta.recibirSMS
+                : true
+            ),
+      compartirHistorial:
+        Object.prototype.hasOwnProperty.call(body, 'compartirHistorial')
+          ? Boolean(body.compartirHistorial)
+          : Boolean(currentMeta.compartirHistorial || false),
+    };
+
+    const savedProfile = await upsertUserProfileById(client, user.usuarioid, {
+      meta: mergedMeta,
+    });
+
+    await client.query('COMMIT');
+
+    return res.json({
+      success: true,
+      message: 'Perfil de paciente actualizado.',
+      profile: {
+        usuarioid: user.usuarioid,
+        pacienteid: updatedPaciente?.pacienteid || paciente.pacienteid,
+        email: nextEmail,
+        nombres: updatedPaciente?.nombres || nextNombres,
+        apellidos: updatedPaciente?.apellidos || nextApellidos,
+        fechanacimiento: updatedPaciente?.fechanacimiento || nextFechaNacimiento,
+        genero: updatedPaciente?.genero || nextGenero,
+        cedula: updatedPaciente?.cedula || nextCedula,
+        telefono: updatedPaciente?.telefono || nextTelefono,
+        fotoUrl: savedProfile?.fotoUrl || currentProfile?.fotoUrl || null,
+        ...mergedMeta,
+      },
+    });
+  } catch (err) {
+    if (client) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (_) {}
+    }
+    console.error('Error PUT /users/me/paciente-profile:', err);
+    return res
+      .status(500)
+      .json({ success: false, message: 'Error interno actualizando perfil de paciente.' });
+  } finally {
+    if (client) client.release();
   }
 });
 

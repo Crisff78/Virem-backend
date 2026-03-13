@@ -5,10 +5,17 @@ const nodemailer = require("nodemailer");
 const { randomUUID, randomInt, createHmac } = require("crypto");
 const pool = require("../config/db");
 const { consultarExequaturSNS } = require("../services/exequatur.provider.js");
-const { getUserProfileById } = require("../services/user-profile.store");
+const {
+  getUserProfileById,
+  upsertUserProfileById,
+  isSupportedImageUri,
+  MAX_PHOTO_URL_LENGTH,
+} = require("../services/user-profile.store");
 const { requireAuth } = require("./middleware/auth");
 
 const router = express.Router();
+const MEDICO_ROLE_ID = 2;
+const PACIENTE_ROLE_ID = 1;
 
 /**
  * Convierte "DD/MM/YYYY" -> "YYYY-MM-DD"
@@ -426,6 +433,105 @@ async function getMedicoProfileByUsuarioId(client, usuarioid, userCreatedAt) {
   return null;
 }
 
+async function getPacienteProfileByUsuarioId(client, usuarioid, userCreatedAt) {
+  const directResult = await client.query(
+    `SELECT
+       p.pacienteid,
+       p.nombres,
+       p.apellidos,
+       p.fechanacimiento,
+       p.genero,
+       p.cedula,
+       p.telefono,
+       p.fecharegistro
+     FROM paciente p
+     WHERE p.pacienteid::text = $1::text
+     LIMIT 1`,
+    [String(usuarioid)]
+  );
+
+  if (directResult.rows.length) {
+    return directResult.rows[0];
+  }
+
+  if (userCreatedAt) {
+    const byRank = await client.query(
+      `WITH user_rank AS (
+         SELECT
+           u.usuarioid,
+           u.fechacreacion,
+           ROW_NUMBER() OVER (ORDER BY u.fechacreacion DESC, u.usuarioid DESC) AS rn
+         FROM usuario u
+         WHERE u.rolid = $2
+       ),
+       paciente_rank AS (
+         SELECT
+           p.pacienteid,
+           p.nombres,
+           p.apellidos,
+           p.fechanacimiento,
+           p.genero,
+           p.cedula,
+           p.telefono,
+           p.fecharegistro,
+           ROW_NUMBER() OVER (ORDER BY p.fecharegistro DESC, p.pacienteid DESC) AS rn
+         FROM paciente p
+       )
+       SELECT
+         pr.*,
+         ABS(
+           EXTRACT(
+             EPOCH FROM ((pr.fecharegistro::timestamp) - (ur.fechacreacion::timestamp))
+           )
+         ) AS diff_seconds
+       FROM user_rank ur
+       JOIN paciente_rank pr ON pr.rn = ur.rn
+       WHERE ur.usuarioid = $1
+       LIMIT 1`,
+      [Number(usuarioid), PACIENTE_ROLE_ID]
+    );
+
+    if (byRank.rows.length) {
+      const row = byRank.rows[0];
+      const diffSeconds = Number(row.diff_seconds || 0);
+      if (Number.isFinite(diffSeconds) && diffSeconds <= 86400) {
+        return row;
+      }
+    }
+
+    const byNearest = await client.query(
+      `SELECT
+         p.pacienteid,
+         p.nombres,
+         p.apellidos,
+         p.fechanacimiento,
+         p.genero,
+         p.cedula,
+         p.telefono,
+         p.fecharegistro,
+         ABS(
+           EXTRACT(
+             EPOCH FROM ((p.fecharegistro::timestamp) - ($1::timestamp))
+           )
+         ) AS diff_seconds
+       FROM paciente p
+       ORDER BY diff_seconds ASC
+       LIMIT 1`,
+      [userCreatedAt]
+    );
+
+    if (byNearest.rows.length) {
+      const row = byNearest.rows[0];
+      const diffSeconds = Number(row.diff_seconds || 0);
+      if (Number.isFinite(diffSeconds) && diffSeconds <= 86400) {
+        return row;
+      }
+    }
+  }
+
+  return null;
+}
+
 async function buildAuthUserPayload(client, userRow) {
   const payload = {
     usuarioid: userRow.usuarioid,
@@ -433,7 +539,9 @@ async function buildAuthUserPayload(client, userRow) {
     email: userRow.email,
   };
 
-  const isMedico = Number(userRow.rolid) === 2;
+  const isMedico = Number(userRow.rolid) === MEDICO_ROLE_ID;
+  const isPaciente = Number(userRow.rolid) === PACIENTE_ROLE_ID;
+
   if (isMedico) {
     const medicoProfile = await getMedicoProfileByUsuarioId(
       client,
@@ -443,11 +551,62 @@ async function buildAuthUserPayload(client, userRow) {
     if (medicoProfile) {
       Object.assign(payload, medicoProfile);
     }
+  } else if (isPaciente) {
+    const pacienteProfile = await getPacienteProfileByUsuarioId(
+      client,
+      userRow.usuarioid,
+      userRow.fechacreacion
+    );
+
+    if (pacienteProfile) {
+      const nombres = String(pacienteProfile.nombres || '').trim();
+      const apellidos = String(pacienteProfile.apellidos || '').trim();
+      Object.assign(payload, {
+        pacienteid: pacienteProfile.pacienteid ?? null,
+        nombres,
+        apellidos,
+        nombre: nombres || null,
+        apellido: apellidos || null,
+        fechanacimiento: pacienteProfile.fechanacimiento ?? null,
+        genero: pacienteProfile.genero ?? null,
+        cedula: pacienteProfile.cedula ?? null,
+        telefono: pacienteProfile.telefono ?? null,
+        nombreCompleto: `${nombres} ${apellidos}`.trim() || null,
+      });
+    }
   }
 
   const userProfile = await getUserProfileById(client, userRow.usuarioid);
   if (userProfile?.fotoUrl) {
     payload.fotoUrl = userProfile.fotoUrl;
+  }
+  const meta = userProfile?.meta;
+  if (meta && typeof meta === "object") {
+    const assignIfMissing = (key, value) => {
+      const clean = typeof value === "string" ? value.trim() : value;
+      if (clean === undefined || clean === null || clean === "") return;
+      if (!Object.prototype.hasOwnProperty.call(payload, key) || !payload[key]) {
+        payload[key] = clean;
+      }
+    };
+
+    assignIfMissing("direccion", meta.direccion);
+    assignIfMissing("tipoSangre", meta.tipoSangre);
+    assignIfMissing("alergias", meta.alergias);
+    assignIfMissing("medicamentos", meta.medicamentos);
+    assignIfMissing("antecedentes", meta.antecedentes);
+    assignIfMissing("contactoEmergenciaNombre", meta.contactoEmergenciaNombre);
+    assignIfMissing("contactoEmergenciaTelefono", meta.contactoEmergenciaTelefono);
+    assignIfMissing("contactoEmergenciaParentesco", meta.contactoEmergenciaParentesco);
+    if (Object.prototype.hasOwnProperty.call(meta, "recibirEmail")) {
+      payload.recibirEmail = Boolean(meta.recibirEmail);
+    }
+    if (Object.prototype.hasOwnProperty.call(meta, "recibirSMS")) {
+      payload.recibirSMS = Boolean(meta.recibirSMS);
+    }
+    if (Object.prototype.hasOwnProperty.call(meta, "compartirHistorial")) {
+      payload.compartirHistorial = Boolean(meta.compartirHistorial);
+    }
   }
 
   return payload;
@@ -593,6 +752,7 @@ router.post("/register-medico", async (req, res) => {
     especialidad,
     cedula,
     telefono,
+    fotoUrl,
     email,
     password,
     exequaturValidationToken,
@@ -624,6 +784,22 @@ router.post("/register-medico", async (req, res) => {
     const cedulaClean = String(cedula).replace(/\D/g, "").slice(0, 11);
     const telefonoClean = normalizePhone(telefono);
     const especialidadTrim = String(especialidad).trim();
+    const fotoUrlTrim = String(fotoUrl || "").trim();
+
+    if (fotoUrlTrim.length > MAX_PHOTO_URL_LENGTH) {
+      return res.status(400).json({
+        success: false,
+        message: `fotoUrl supera ${MAX_PHOTO_URL_LENGTH} caracteres.`,
+      });
+    }
+
+    if (!isSupportedImageUri(fotoUrlTrim || null)) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "fotoUrl debe iniciar con http://, https://, file:// o data:image/.",
+      });
+    }
 
     const tokenRaw = String(exequaturValidationToken || "").trim();
     let exequaturValidatedByToken = false;
@@ -717,6 +893,10 @@ router.post("/register-medico", async (req, res) => {
       telefonoClean,
       especialidadTrim,
     });
+
+    if (fotoUrlTrim) {
+      await upsertUserProfileById(client, usuarioid, { fotoUrl: fotoUrlTrim });
+    }
 
     await client.query("COMMIT");
 

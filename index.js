@@ -7,7 +7,7 @@ const app = express();
 
 // Middlewares
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "8mb" }));
 
 pool.query("SELECT NOW()")
   .then(res => {
@@ -27,6 +27,8 @@ app.get("/", (req, res) => {
       health: "/health",
       auth: "/api/auth",
       users: "/api/users",
+      medicos: "/api/medicos",
+      pacientes: "/api/pacientes",
       validarTelefono: "/api/validar-telefono",
       recuperarContrasena: "/api/auth/recovery/send-code",
     },
@@ -49,6 +51,18 @@ app.use("/api/auth", authRoutes);
 // ===============================
 const usersRoutes = require("./routes/users.routes.js");
 app.use("/api/users", usersRoutes);
+
+// ===============================
+// ✅ RUTAS MEDICOS
+// ===============================
+const medicosRoutes = require("./routes/medicos.routes.js");
+app.use("/api/medicos", medicosRoutes);
+
+// ===============================
+// ✅ RUTAS PACIENTES
+// ===============================
+const pacientesRoutes = require("./routes/pacientes.routes.js");
+app.use("/api/pacientes", pacientesRoutes);
 
 // ===============================
 // ✅ RUTA VALIDAR TELÉFONO
