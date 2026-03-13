@@ -32,15 +32,15 @@ const SNS_TIMEOUT_MS = Math.max(
 );
 const SNS_MAX_ATTEMPTS = Math.max(
   1,
-  Number.parseInt(process.env.SNS_MAX_ATTEMPTS || "3", 10) || 3
+  Number.parseInt(process.env.SNS_MAX_ATTEMPTS || "5", 10) || 5
 );
 const SNS_BACKOFF_BASE_MS = Math.max(
   200,
   Number.parseInt(process.env.SNS_BACKOFF_BASE_MS || "600", 10) || 600
 );
 const SNS_UNAVAILABLE_CACHE_MS = Math.max(
-  1000,
-  Number.parseInt(process.env.SNS_UNAVAILABLE_CACHE_MS || "30000", 10) || 30000
+  0,
+  Number.parseInt(process.env.SNS_UNAVAILABLE_CACHE_MS || "0", 10) || 0
 );
 const SNS_TLS_FALLBACK_CACHE_MS = Math.max(
   5000,
@@ -281,7 +281,7 @@ async function consultarExequaturSNS({ nombreCompleto }) {
     return { ok: false, reason: "Debes enviar nombreCompleto." };
   }
 
-  if (nowMs() < snsUnavailableUntil) {
+  if (SNS_UNAVAILABLE_CACHE_MS > 0 && nowMs() < snsUnavailableUntil) {
     return {
       ok: false,
       serviceUnavailable: true,
@@ -306,7 +306,11 @@ async function consultarExequaturSNS({ nombreCompleto }) {
 
     if (result.ok || !result.serviceUnavailable || attempt === SNS_MAX_ATTEMPTS) {
       if (!result.ok && result.serviceUnavailable) {
-        snsUnavailableUntil = nowMs() + SNS_UNAVAILABLE_CACHE_MS;
+        if (SNS_UNAVAILABLE_CACHE_MS > 0) {
+          snsUnavailableUntil = nowMs() + SNS_UNAVAILABLE_CACHE_MS;
+        } else {
+          snsUnavailableUntil = 0;
+        }
         if (result._meta) {
           logSnsUnavailableOnce(result._meta);
         }
@@ -327,7 +331,11 @@ async function consultarExequaturSNS({ nombreCompleto }) {
   if (lastResult?._meta) {
     logSnsUnavailableOnce(lastResult._meta);
   }
-  snsUnavailableUntil = nowMs() + SNS_UNAVAILABLE_CACHE_MS;
+  if (SNS_UNAVAILABLE_CACHE_MS > 0) {
+    snsUnavailableUntil = nowMs() + SNS_UNAVAILABLE_CACHE_MS;
+  } else {
+    snsUnavailableUntil = 0;
+  }
 
   return fallback;
 }

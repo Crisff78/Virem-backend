@@ -1,5 +1,6 @@
 const express = require("express");
 const rateLimit = require("express-rate-limit");
+const jwt = require("jsonwebtoken");
 const { consultarExequaturSNS } = require("../services/exequatur.provider.js");
 
 const router = express.Router();
@@ -60,6 +61,17 @@ router.post("/validar-exequatur", limiter, async (req, res) => {
 
   const records = Array.isArray(result.data) ? result.data : [];
   const doctor = records.length > 0 ? records[0] : null;
+  const validationToken = process.env.JWT_SECRET
+    ? jwt.sign(
+        {
+          scope: "exequatur-validation",
+          nombreCompleto: nombre,
+          exists: true,
+        },
+        process.env.JWT_SECRET,
+        { expiresIn: "20m" }
+      )
+    : null;
 
   console.log(`[SNS] Coincidencias encontradas para "${nombre}": ${records.length}`);
   console.log("[SNS] Datos encontrados:", records);
@@ -70,6 +82,7 @@ router.post("/validar-exequatur", limiter, async (req, res) => {
     doctor,
     records,
     match: result.match || null,
+    validationToken,
   });
 });
 

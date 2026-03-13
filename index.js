@@ -26,7 +26,9 @@ app.get("/", (req, res) => {
     endpoints: {
       health: "/health",
       auth: "/api/auth",
+      users: "/api/users",
       validarTelefono: "/api/validar-telefono",
+      recuperarContrasena: "/api/auth/recovery/send-code",
     },
   });
 });
@@ -41,6 +43,12 @@ app.get("/health", (req, res) => {
 // ===============================
 const authRoutes = require("./routes/auth.routes.js");
 app.use("/api/auth", authRoutes);
+
+// ===============================
+// ✅ RUTAS USERS (perfil/password)
+// ===============================
+const usersRoutes = require("./routes/users.routes.js");
+app.use("/api/users", usersRoutes);
 
 // ===============================
 // ✅ RUTA VALIDAR TELÉFONO
