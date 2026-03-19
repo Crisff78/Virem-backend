@@ -187,6 +187,73 @@ async function sendRecoveryCodeEmail({ email, code }) {
 
 let medicoColumnsCache = null;
 
+function normalizeComparableText(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+async function resolveEspecialidadIdFlexible(client, especialidadValue) {
+  const raw = String(especialidadValue || "").replace(/\s+/g, " ").trim();
+  if (!raw) return null;
+
+  if (/^\d+$/.test(raw)) {
+    const byId = await client.query(
+      `SELECT especialidadid
+       FROM especialidad
+       WHERE especialidadid = $1
+       LIMIT 1`,
+      [Number(raw)]
+    );
+    if (byId.rows.length) {
+      return Number(byId.rows[0].especialidadid);
+    }
+  }
+
+  const all = await client.query(
+    `SELECT especialidadid, nombre
+     FROM especialidad
+     ORDER BY especialidadid ASC`
+  );
+  const normalizedTarget = normalizeComparableText(raw);
+
+  const exactMatch = all.rows.find(
+    (row) => normalizeComparableText(row.nombre) === normalizedTarget
+  );
+  if (exactMatch) return Number(exactMatch.especialidadid);
+
+  const fuzzyMatch = all.rows.find((row) => {
+    const normalizedRow = normalizeComparableText(row.nombre);
+    return (
+      normalizedRow.includes(normalizedTarget) ||
+      normalizedTarget.includes(normalizedRow)
+    );
+  });
+  if (fuzzyMatch) return Number(fuzzyMatch.especialidadid);
+
+  try {
+    const inserted = await client.query(
+      `INSERT INTO especialidad (nombre)
+       VALUES ($1)
+       RETURNING especialidadid`,
+      [raw]
+    );
+    return Number(inserted.rows[0]?.especialidadid || 0) || null;
+  } catch (_) {
+    const retry = await client.query(
+      `SELECT especialidadid
+       FROM especialidad
+       WHERE lower(nombre) = lower($1)
+       LIMIT 1`,
+      [raw]
+    );
+    return retry.rows.length ? Number(retry.rows[0].especialidadid) : null;
+  }
+}
+
 async function getMedicoColumns(client) {
   if (medicoColumnsCache) return medicoColumnsCache;
 
@@ -251,17 +318,7 @@ async function insertMedicoCompatible({
   if (medicoColumns.has("especialidad")) {
     addParam("especialidad", especialidadTrim);
   } else if (medicoColumns.has("especialidadid")) {
-    let especialidadId = null;
-    if (especialidadTrim) {
-      const espResult = await client.query(
-        `SELECT especialidadid
-         FROM especialidad
-         WHERE lower(nombre) = lower($1)
-         LIMIT 1`,
-        [especialidadTrim]
-      );
-      especialidadId = espResult.rows[0]?.especialidadid ?? null;
-    }
+    const especialidadId = await resolveEspecialidadIdFlexible(client, especialidadTrim);
     addParam("especialidadid", especialidadId);
   }
   if (medicoColumns.has("consultorio")) addParam("consultorio", null);
@@ -294,9 +351,12 @@ async function insertMedicoCompatible({
   };
 }
 
-async function getMedicoProfileByUsuarioId(client, usuarioid, userCreatedAt) {
+async function getMedicoProfileByUsuarioId(client, usuarioid, userCreatedAt, options = {}) {
   const medicoColumns = await getMedicoColumns(client);
   const filters = [];
+  const knownMedicoId = String(options?.knownMedicoId || "")
+    .replace(/\s+/g, " ")
+    .trim();
 
   if (medicoColumns.has("medicoid")) {
     filters.push("m.medicoid::text = $1::text");
@@ -312,7 +372,7 @@ async function getMedicoProfileByUsuarioId(client, usuarioid, userCreatedAt) {
   const especialidadExpr = hasEspecialidadText
     ? `m.especialidad AS "especialidad"`
     : hasEspecialidadId
-      ? `e.nombre AS "especialidad"`
+      ? `COALESCE(e.nombre, 'Medicina General') AS "especialidad"`
       : `NULL AS "especialidad"`;
 
   const joinEspecialidad = hasEspecialidadId
@@ -348,6 +408,14 @@ async function getMedicoProfileByUsuarioId(client, usuarioid, userCreatedAt) {
     especialidad: row.especialidad ?? null,
     fecharegistro: row.fecharegistro ?? null,
   });
+
+  if (knownMedicoId) {
+    const byKnownIdSql = buildQuery(`WHERE m.medicoid::text = $1::text`);
+    const byKnownId = await client.query(byKnownIdSql, [knownMedicoId]);
+    if (byKnownId.rows.length) {
+      return normalizeRow(byKnownId.rows[0]);
+    }
+  }
 
   if (filters.length) {
     const directSql = buildQuery(`WHERE ${filters.join(" OR ")}`);
@@ -538,18 +606,38 @@ async function buildAuthUserPayload(client, userRow) {
     rolid: userRow.rolid,
     email: userRow.email,
   };
+  const userProfile = await getUserProfileById(client, userRow.usuarioid);
+  const meta =
+    userProfile?.meta && typeof userProfile.meta === "object" ? userProfile.meta : {};
 
   const isMedico = Number(userRow.rolid) === MEDICO_ROLE_ID;
   const isPaciente = Number(userRow.rolid) === PACIENTE_ROLE_ID;
 
   if (isMedico) {
+    const knownMedicoId = String(meta.medicoid || meta.medicoId || "")
+      .replace(/\s+/g, " ")
+      .trim();
     const medicoProfile = await getMedicoProfileByUsuarioId(
       client,
       userRow.usuarioid,
-      userRow.fechacreacion
+      userRow.fechacreacion,
+      { knownMedicoId }
     );
     if (medicoProfile) {
       Object.assign(payload, medicoProfile);
+
+      const medicoIdResolved = String(medicoProfile.medicoid || "").trim();
+      if (medicoIdResolved && medicoIdResolved !== knownMedicoId) {
+        try {
+          await upsertUserProfileById(client, userRow.usuarioid, {
+            meta: {
+              ...meta,
+              medicoid: medicoIdResolved,
+            },
+          });
+          meta.medicoid = medicoIdResolved;
+        } catch (_) {}
+      }
     }
   } else if (isPaciente) {
     const pacienteProfile = await getPacienteProfileByUsuarioId(
@@ -576,11 +664,9 @@ async function buildAuthUserPayload(client, userRow) {
     }
   }
 
-  const userProfile = await getUserProfileById(client, userRow.usuarioid);
   if (userProfile?.fotoUrl) {
     payload.fotoUrl = userProfile.fotoUrl;
   }
-  const meta = userProfile?.meta;
   if (meta && typeof meta === "object") {
     const assignIfMissing = (key, value) => {
       const clean = typeof value === "string" ? value.trim() : value;
@@ -589,6 +675,14 @@ async function buildAuthUserPayload(client, userRow) {
         payload[key] = clean;
       }
     };
+
+    assignIfMissing("medicoid", meta.medicoid || meta.medicoId);
+    assignIfMissing("nombreCompleto", meta.nombreCompleto);
+    assignIfMissing("especialidad", meta.especialidad);
+    assignIfMissing("cedula", meta.cedula);
+    assignIfMissing("telefono", meta.telefono);
+    assignIfMissing("genero", meta.genero);
+    assignIfMissing("fechanacimiento", meta.fechanacimiento);
 
     assignIfMissing("direccion", meta.direccion);
     assignIfMissing("tipoSangre", meta.tipoSangre);
@@ -894,9 +988,19 @@ router.post("/register-medico", async (req, res) => {
       especialidadTrim,
     });
 
-    if (fotoUrlTrim) {
-      await upsertUserProfileById(client, usuarioid, { fotoUrl: fotoUrlTrim });
-    }
+    const profilePatch = {
+      meta: {
+        medicoid: String(medicoRow.medicoid || "").trim(),
+        nombreCompleto: nombreCompletoTrim,
+        especialidad: especialidadTrim,
+        cedula: cedulaClean,
+        telefono: telefonoClean,
+        genero: String(genero || "").trim(),
+        fechanacimiento: fechaSQL,
+      },
+    };
+    if (fotoUrlTrim) profilePatch.fotoUrl = fotoUrlTrim;
+    await upsertUserProfileById(client, usuarioid, profilePatch);
 
     await client.query("COMMIT");
 

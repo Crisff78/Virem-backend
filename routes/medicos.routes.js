@@ -5,6 +5,15 @@ const { requireAuth } = require("./middleware/auth");
 
 const router = express.Router();
 
+function normalizeComparableText(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
 function normalizeDate(rawValue) {
   const raw = String(rawValue || "").trim();
   if (!raw) return "";
@@ -37,16 +46,45 @@ async function resolveEspecialidadId(client, especialidadValue) {
     if (byId.rows.length) return Number(byId.rows[0].especialidadid);
   }
 
-  const byName = await client.query(
-    `SELECT especialidadid
+  const all = await client.query(
+    `SELECT especialidadid, nombre
      FROM especialidad
-     WHERE lower(nombre) = lower($1)
-     LIMIT 1`,
-    [raw]
+     ORDER BY especialidadid ASC`
   );
-  if (byName.rows.length) return Number(byName.rows[0].especialidadid);
+  const normalizedTarget = normalizeComparableText(raw);
 
-  return null;
+  const exact = all.rows.find(
+    (row) => normalizeComparableText(row.nombre) === normalizedTarget
+  );
+  if (exact) return Number(exact.especialidadid);
+
+  const fuzzy = all.rows.find((row) => {
+    const normalizedName = normalizeComparableText(row.nombre);
+    return (
+      normalizedName.includes(normalizedTarget) ||
+      normalizedTarget.includes(normalizedName)
+    );
+  });
+  if (fuzzy) return Number(fuzzy.especialidadid);
+
+  try {
+    const inserted = await client.query(
+      `INSERT INTO especialidad (nombre)
+       VALUES ($1)
+       RETURNING especialidadid`,
+      [raw]
+    );
+    return Number(inserted.rows[0]?.especialidadid || 0) || null;
+  } catch (_) {
+    const retry = await client.query(
+      `SELECT especialidadid
+       FROM especialidad
+       WHERE lower(nombre) = lower($1)
+       LIMIT 1`,
+      [raw]
+    );
+    return retry.rows.length ? Number(retry.rows[0].especialidadid) : null;
+  }
 }
 
 // ===============================
@@ -65,7 +103,7 @@ router.get("/", requireAuth, async (_req, res) => {
          m.telefono,
          m.consultorio,
          m.especialidadid,
-         COALESCE(e.nombre, '') AS "especialidad",
+         COALESCE(e.nombre, 'Medicina General') AS "especialidad",
          m.fecharegistro
        FROM medico m
        LEFT JOIN especialidad e ON e.especialidadid = m.especialidadid
@@ -75,6 +113,38 @@ router.get("/", requireAuth, async (_req, res) => {
   } catch (err) {
     console.error("Error GET /medicos:", err);
     return res.status(500).json({ success: false, message: "Error interno listando medicos." });
+  }
+});
+
+// ===============================
+// API: Listar especialidades
+// Endpoint: GET /api/medicos/especialidades
+// ===============================
+router.get("/especialidades", requireAuth, async (_req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT
+         e.especialidadid,
+         e.nombre,
+         COUNT(m.medicoid) FILTER (WHERE m.medicoid IS NOT NULL)::int AS total_medicos
+       FROM especialidad e
+       LEFT JOIN medico m ON m.especialidadid = e.especialidadid
+       GROUP BY e.especialidadid, e.nombre
+       ORDER BY lower(e.nombre) ASC`
+    );
+    return res.json({
+      success: true,
+      especialidades: result.rows.map((row) => ({
+        especialidadid: Number(row.especialidadid),
+        nombre: String(row.nombre || "").trim(),
+        totalMedicos: Number(row.total_medicos || 0),
+      })),
+    });
+  } catch (err) {
+    console.error("Error GET /medicos/especialidades:", err);
+    return res
+      .status(500)
+      .json({ success: false, message: "Error interno listando especialidades." });
   }
 });
 
@@ -94,7 +164,7 @@ router.get("/:id", requireAuth, async (req, res) => {
          m.telefono,
          m.consultorio,
          m.especialidadid,
-         COALESCE(e.nombre, '') AS "especialidad",
+         COALESCE(e.nombre, 'Medicina General') AS "especialidad",
          m.fecharegistro
        FROM medico m
        LEFT JOIN especialidad e ON e.especialidadid = m.especialidadid

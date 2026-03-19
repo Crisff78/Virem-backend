@@ -7,7 +7,7 @@ const app = express();
 
 // Middlewares
 app.use(cors());
-app.use(express.json({ limit: "8mb" }));
+app.use(express.json({ limit: "20mb" }));
 
 pool.query("SELECT NOW()")
   .then(res => {

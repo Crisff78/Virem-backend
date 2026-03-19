@@ -92,7 +92,28 @@ function toSqlDate(rawValue) {
   return `${yyyy}-${mm}-${dd}`;
 }
 
-async function getMedicoByUsuarioId(client, usuarioid, userCreatedAt) {
+async function getMedicoByUsuarioId(client, usuarioid, userCreatedAt, knownMedicoId = '') {
+  const knownId = String(knownMedicoId || '').trim();
+  if (knownId) {
+    const byKnownId = await client.query(
+      `SELECT
+         m.medicoid::text AS medicoid,
+         m.nombrecompleto,
+         m.fechanacimiento,
+         m.genero,
+         m.cedula,
+         m.telefono,
+         COALESCE(e.nombre, 'Medicina General') AS especialidad,
+         m.fecharegistro
+       FROM medico m
+       LEFT JOIN especialidad e ON e.especialidadid = m.especialidadid
+       WHERE m.medicoid::text = $1::text
+       LIMIT 1`,
+      [knownId]
+    );
+    if (byKnownId.rows.length) return byKnownId.rows[0];
+  }
+
   const direct = await client.query(
     `SELECT
        m.medicoid::text AS medicoid,
@@ -101,7 +122,7 @@ async function getMedicoByUsuarioId(client, usuarioid, userCreatedAt) {
        m.genero,
        m.cedula,
        m.telefono,
-       COALESCE(e.nombre, '') AS especialidad,
+       COALESCE(e.nombre, 'Medicina General') AS especialidad,
        m.fecharegistro
      FROM medico m
      LEFT JOIN especialidad e ON e.especialidadid = m.especialidadid
@@ -130,7 +151,7 @@ async function getMedicoByUsuarioId(client, usuarioid, userCreatedAt) {
          m.genero,
          m.cedula,
          m.telefono,
-         COALESCE(e.nombre, '') AS especialidad,
+         COALESCE(e.nombre, 'Medicina General') AS especialidad,
          m.fecharegistro,
          ROW_NUMBER() OVER (ORDER BY m.fecharegistro DESC, m.medicoid DESC) AS rn
        FROM medico m
@@ -162,7 +183,7 @@ async function getMedicoByUsuarioId(client, usuarioid, userCreatedAt) {
        m.genero,
        m.cedula,
        m.telefono,
-       COALESCE(e.nombre, '') AS especialidad,
+       COALESCE(e.nombre, 'Medicina General') AS especialidad,
        m.fecharegistro,
        ABS(EXTRACT(EPOCH FROM (m.fecharegistro - $1::timestamptz))) AS diff_seconds
      FROM medico m
@@ -324,7 +345,7 @@ async function resolveMedicoForCita(client, { medicoId, nombreMedico, especialid
       `SELECT
          m.medicoid::text AS medicoid,
          m.nombrecompleto,
-         COALESCE(e.nombre, '') AS especialidad
+         COALESCE(e.nombre, 'Medicina General') AS especialidad
        FROM medico m
        LEFT JOIN especialidad e ON e.especialidadid = m.especialidadid
        WHERE m.medicoid::text = $1::text
@@ -340,7 +361,7 @@ async function resolveMedicoForCita(client, { medicoId, nombreMedico, especialid
       `SELECT
          m.medicoid::text AS medicoid,
          m.nombrecompleto,
-         COALESCE(e.nombre, '') AS especialidad
+         COALESCE(e.nombre, 'Medicina General') AS especialidad
        FROM medico m
        LEFT JOIN especialidad e ON e.especialidadid = m.especialidadid
        WHERE lower(m.nombrecompleto) = lower($1)
@@ -357,7 +378,7 @@ async function resolveMedicoForCita(client, { medicoId, nombreMedico, especialid
       `SELECT
          m.medicoid::text AS medicoid,
          m.nombrecompleto,
-         COALESCE(e.nombre, '') AS especialidad
+         COALESCE(e.nombre, 'Medicina General') AS especialidad
        FROM medico m
        LEFT JOIN especialidad e ON e.especialidadid = m.especialidadid
        WHERE lower(COALESCE(e.nombre, '')) = lower($1)
@@ -373,7 +394,7 @@ async function resolveMedicoForCita(client, { medicoId, nombreMedico, especialid
     `SELECT
        m.medicoid::text AS medicoid,
        m.nombrecompleto,
-       COALESCE(e.nombre, '') AS especialidad
+       COALESCE(e.nombre, 'Medicina General') AS especialidad
      FROM medico m
      LEFT JOIN especialidad e ON e.especialidadid = m.especialidadid
      ORDER BY m.fecharegistro DESC
@@ -964,8 +985,30 @@ router.get('/me/dashboard-medico', requireAuth, async (req, res) => {
       });
     }
 
-    const medico = await getMedicoByUsuarioId(client, user.usuarioid, user.fechacreacion);
     const profileDb = await getUserProfileById(client, user.usuarioid);
+    const profileMeta =
+      profileDb?.meta && typeof profileDb.meta === 'object' ? profileDb.meta : {};
+    const knownMedicoId = String(profileMeta.medicoid || profileMeta.medicoId || '').trim();
+    const medico = await getMedicoByUsuarioId(
+      client,
+      user.usuarioid,
+      user.fechacreacion,
+      knownMedicoId
+    );
+
+    if (medico) {
+      const resolvedMedicoId = String(medico.medicoid || '').trim();
+      if (resolvedMedicoId && resolvedMedicoId !== knownMedicoId) {
+        try {
+          await upsertUserProfileById(client, user.usuarioid, {
+            meta: {
+              ...profileMeta,
+              medicoid: resolvedMedicoId,
+            },
+          });
+        } catch (_) {}
+      }
+    }
 
     if (!medico) {
       return res.json({
@@ -974,11 +1017,11 @@ router.get('/me/dashboard-medico', requireAuth, async (req, res) => {
           profile: {
             usuarioid: user.usuarioid,
             email: user.email,
-            medicoid: null,
-            nombreCompleto: null,
-            especialidad: null,
-            cedula: null,
-            telefono: null,
+            medicoid: knownMedicoId || null,
+            nombreCompleto: String(profileMeta.nombreCompleto || '').trim() || null,
+            especialidad: String(profileMeta.especialidad || '').trim() || null,
+            cedula: String(profileMeta.cedula || '').trim() || null,
+            telefono: String(profileMeta.telefono || '').trim() || null,
             fotoUrl: profileDb?.fotoUrl || null,
           },
           stats: {
@@ -1075,7 +1118,7 @@ router.get('/me/citas', requireAuth, async (req, res) => {
            COALESCE(ec.nombre, 'Pendiente') AS estado,
            m.medicoid::text AS medicoid,
            m.nombrecompleto AS medico_nombre,
-           COALESCE(e.nombre, '') AS medico_especialidad
+           COALESCE(e.nombre, 'Medicina General') AS medico_especialidad
          FROM cita c
          LEFT JOIN estado_cita ec ON ec.estadocitaid = c.estadocitaid
          LEFT JOIN medico m ON m.medicoid::text = c.medicoid::text
@@ -1108,9 +1151,30 @@ router.get('/me/citas', requireAuth, async (req, res) => {
     }
 
     if (Number(user.rolid) === MEDICO_ROLE_ID) {
-      const medico = await getMedicoByUsuarioId(client, user.usuarioid, user.fechacreacion);
+      const profileDb = await getUserProfileById(client, user.usuarioid);
+      const profileMeta =
+        profileDb?.meta && typeof profileDb.meta === 'object' ? profileDb.meta : {};
+      const knownMedicoId = String(profileMeta.medicoid || profileMeta.medicoId || '').trim();
+      const medico = await getMedicoByUsuarioId(
+        client,
+        user.usuarioid,
+        user.fechacreacion,
+        knownMedicoId
+      );
       if (!medico) {
         return res.status(404).json({ success: false, message: 'Perfil de medico no encontrado.' });
+      }
+
+      const resolvedMedicoId = String(medico.medicoid || '').trim();
+      if (resolvedMedicoId && resolvedMedicoId !== knownMedicoId) {
+        try {
+          await upsertUserProfileById(client, user.usuarioid, {
+            meta: {
+              ...profileMeta,
+              medicoid: resolvedMedicoId,
+            },
+          });
+        } catch (_) {}
       }
 
       const citasResult = await client.query(

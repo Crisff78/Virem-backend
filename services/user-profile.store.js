@@ -1,7 +1,7 @@
 const pool = require("../config/db");
 
 const USER_PROFILE_TABLE = "usuario_perfil";
-const MAX_PHOTO_URL_LENGTH = 3000000;
+const MAX_PHOTO_URL_LENGTH = 16000000;
 
 let ensureUserProfileTablePromise = null;
 
@@ -51,6 +51,14 @@ async function ensureUserProfileTable() {
           )`
         );
       }
+      await pool.query(
+        `ALTER TABLE ${USER_PROFILE_TABLE}
+         ADD COLUMN IF NOT EXISTS foto_url TEXT`
+      );
+      await pool.query(
+        `ALTER TABLE ${USER_PROFILE_TABLE}
+         ALTER COLUMN foto_url TYPE TEXT`
+      );
       await pool.query(
         `ALTER TABLE ${USER_PROFILE_TABLE}
          ADD COLUMN IF NOT EXISTS meta_json JSONB NOT NULL DEFAULT '{}'::jsonb`
