@@ -348,6 +348,31 @@ async function ensureEstadoCitaBase(client) {
   return estadoPendienteId;
 }
 
+async function ensureEstadoCitaByName(client, nombre, descripcion = '') {
+  const cleanName = String(nombre || '').trim();
+  if (!cleanName) return null;
+
+  const existing = await client.query(
+    `SELECT estadocitaid
+     FROM estado_cita
+     WHERE lower(nombre) = lower($1)
+     ORDER BY estadocitaid ASC
+     LIMIT 1`,
+    [cleanName]
+  );
+  if (existing.rows.length) {
+    return Number(existing.rows[0].estadocitaid);
+  }
+
+  const inserted = await client.query(
+    `INSERT INTO estado_cita (nombre, descripcion)
+     VALUES ($1, $2)
+     RETURNING estadocitaid`,
+    [cleanName, String(descripcion || '').trim() || null]
+  );
+  return Number(inserted.rows[0]?.estadocitaid || 0) || null;
+}
+
 async function resolveMedicoForCita(client, { medicoId, nombreMedico, especialidad }) {
   const requestedId = String(medicoId || '').trim();
   const requestedName = String(nombreMedico || '').replace(/\s+/g, ' ').trim();
@@ -536,6 +561,7 @@ async function getMedicoDashboardData(client, medicoid) {
       time: formatTime(row.fechahorainicio),
       name: String(row.paciente_nombre || 'Paciente'),
       detail: detailRaw || 'Consulta programada',
+      patientId: String(row.pacienteid || ''),
       patientCode: buildPatientCode(row.pacienteid),
     };
   });
@@ -1618,6 +1644,255 @@ router.patch('/me/citas/:citaId/postpone', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('Error PATCH /users/me/citas/:citaId/postpone:', err);
     return res.status(500).json({ success: false, message: 'Error interno posponiendo cita.' });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+// ===============================
+// API: Gestion de cita por medico autenticado
+// Endpoint: PATCH /api/users/me/citas/:citaId/manage
+// Body:
+//   - { action: "complete" | "cancel" }
+//   - { action: "reschedule", fechaHoraInicio?: ISO, duracionMin?: number }
+// ===============================
+router.patch('/me/citas/:citaId/manage', requireAuth, async (req, res) => {
+  const citaId = String(req.params?.citaId || '').trim();
+  const action = String(req.body?.action || '').trim().toLowerCase();
+  const fechaHoraInicioRaw = String(req.body?.fechaHoraInicio || '').trim();
+  const requestedDuracionMin = clampInt(req.body?.duracionMin, 15, 180, 30);
+
+  if (!citaId) {
+    return res.status(400).json({ success: false, message: 'citaId es obligatorio.' });
+  }
+  if (!['complete', 'cancel', 'reschedule'].includes(action)) {
+    return res.status(400).json({
+      success: false,
+      message: 'action debe ser complete, cancel o reschedule.',
+    });
+  }
+
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('BEGIN');
+
+    const userResult = await client.query(
+      `SELECT usuarioid, rolid, email, activo, fechacreacion
+       FROM usuario
+       WHERE usuarioid = $1
+       LIMIT 1`,
+      [req.user.usuarioid]
+    );
+
+    if (!userResult.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ success: false, message: 'Usuario no encontrado.' });
+    }
+
+    const user = userResult.rows[0];
+    if (!Boolean(user.activo)) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ success: false, message: 'Usuario inactivo.' });
+    }
+    if (Number(user.rolid) !== MEDICO_ROLE_ID) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({
+        success: false,
+        message: 'Solo los medicos pueden gestionar esta cita.',
+      });
+    }
+
+    const profileDb = await getUserProfileById(client, user.usuarioid);
+    const profileMeta =
+      profileDb?.meta && typeof profileDb.meta === 'object' ? profileDb.meta : {};
+    const knownMedicoId = String(profileMeta.medicoid || profileMeta.medicoId || '').trim();
+    const medico = await getMedicoByUsuarioId(
+      client,
+      user.usuarioid,
+      user.fechacreacion,
+      knownMedicoId
+    );
+    if (!medico) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ success: false, message: 'Perfil de medico no encontrado.' });
+    }
+
+    const citaResult = await client.query(
+      `SELECT
+         c.citaid::text AS citaid,
+         c.fechahorainicio,
+         c.fechahorafin,
+         c.duracionmin,
+         COALESCE(ec.nombre, 'Pendiente') AS estado,
+         p.pacienteid::text AS pacienteid,
+         COALESCE(
+           NULLIF(TRIM(COALESCE(p.nombres, '') || ' ' || COALESCE(p.apellidos, '')), ''),
+           'Paciente'
+         ) AS paciente_nombre
+       FROM cita c
+       LEFT JOIN estado_cita ec ON ec.estadocitaid = c.estadocitaid
+       LEFT JOIN paciente p ON p.pacienteid = c.pacienteid
+       WHERE c.citaid::text = $1::text
+         AND c.medicoid::text = $2::text
+       LIMIT 1`,
+      [citaId, String(medico.medicoid)]
+    );
+
+    if (!citaResult.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({
+        success: false,
+        message: 'No se encontro la cita para este medico.',
+      });
+    }
+
+    const cita = citaResult.rows[0];
+    let updateResult = null;
+
+    await ensureEstadoCitaBase(client);
+
+    if (action === 'reschedule') {
+      let nextStart = null;
+      if (fechaHoraInicioRaw) {
+        const parsed = new Date(fechaHoraInicioRaw);
+        if (Number.isNaN(parsed.getTime())) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({
+            success: false,
+            message: 'fechaHoraInicio debe venir en formato ISO valido.',
+          });
+        }
+        nextStart = parsed;
+      } else {
+        const currentStart = new Date(cita.fechahorainicio);
+        if (Number.isNaN(currentStart.getTime())) {
+          nextStart = new Date(Date.now() + 24 * 60 * 60 * 1000);
+        } else {
+          nextStart = new Date(currentStart.getTime() + 24 * 60 * 60 * 1000);
+        }
+      }
+
+      if (!nextStart || nextStart.getTime() <= Date.now()) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          success: false,
+          message: 'La nueva fecha debe ser futura.',
+        });
+      }
+
+      const duracionMin = clampInt(cita.duracionmin || requestedDuracionMin, 15, 180, 30);
+      const nextEnd = new Date(nextStart.getTime() + duracionMin * 60 * 1000);
+      const estadoConfirmadaId = await ensureEstadoCitaByName(
+        client,
+        'Confirmada',
+        'Cita confirmada por el medico.'
+      );
+
+      updateResult = await client.query(
+        `UPDATE cita
+         SET fechahorainicio = $1,
+             fechahorafin = $2,
+             duracionmin = $3,
+             estadocitaid = COALESCE($4, estadocitaid)
+         WHERE citaid::text = $5::text
+           AND medicoid::text = $6::text
+         RETURNING citaid::text AS citaid`,
+        [
+          nextStart.toISOString(),
+          nextEnd.toISOString(),
+          duracionMin,
+          estadoConfirmadaId,
+          citaId,
+          String(medico.medicoid),
+        ]
+      );
+    } else {
+      const targetEstadoNombre = action === 'complete' ? 'Completada' : 'Cancelada';
+      const targetEstadoDescripcion =
+        action === 'complete'
+          ? 'Cita completada satisfactoriamente.'
+          : 'Cita cancelada por el medico.';
+      const estadoId = await ensureEstadoCitaByName(
+        client,
+        targetEstadoNombre,
+        targetEstadoDescripcion
+      );
+
+      updateResult = await client.query(
+        `UPDATE cita
+         SET estadocitaid = $1
+         WHERE citaid::text = $2::text
+           AND medicoid::text = $3::text
+         RETURNING citaid::text AS citaid`,
+        [estadoId, citaId, String(medico.medicoid)]
+      );
+    }
+
+    if (!updateResult?.rows?.length) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        success: false,
+        message: 'No fue posible actualizar la cita.',
+      });
+    }
+
+    const refreshedResult = await client.query(
+      `SELECT
+         c.citaid::text AS citaid,
+         c.fechahorainicio,
+         c.fechahorafin,
+         c.duracionmin,
+         c.nota,
+         c.precio,
+         COALESCE(ec.nombre, 'Pendiente') AS estado,
+         p.pacienteid::text AS pacienteid,
+         COALESCE(
+           NULLIF(TRIM(COALESCE(p.nombres, '') || ' ' || COALESCE(p.apellidos, '')), ''),
+           'Paciente'
+         ) AS paciente_nombre
+       FROM cita c
+       LEFT JOIN estado_cita ec ON ec.estadocitaid = c.estadocitaid
+       LEFT JOIN paciente p ON p.pacienteid = c.pacienteid
+       WHERE c.citaid::text = $1::text
+         AND c.medicoid::text = $2::text
+       LIMIT 1`,
+      [citaId, String(medico.medicoid)]
+    );
+
+    await client.query('COMMIT');
+
+    const updated = refreshedResult.rows[0] || {};
+    return res.json({
+      success: true,
+      message:
+        action === 'reschedule'
+          ? 'Cita reprogramada correctamente.'
+          : action === 'complete'
+            ? 'Cita marcada como completada.'
+            : 'Cita cancelada correctamente.',
+      cita: {
+        citaid: String(updated.citaid || citaId),
+        fechaHoraInicio: updated.fechahorainicio || null,
+        fechaHoraFin: updated.fechahorafin || null,
+        duracionMin: toInt(updated.duracionmin, 30),
+        nota: String(updated.nota || ''),
+        precio: updated.precio ?? null,
+        estado: String(updated.estado || 'Pendiente'),
+        paciente: {
+          pacienteid: String(updated.pacienteid || ''),
+          nombreCompleto: String(updated.paciente_nombre || 'Paciente'),
+        },
+      },
+    });
+  } catch (err) {
+    if (client) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (_) {}
+    }
+    console.error('Error PATCH /users/me/citas/:citaId/manage:', err);
+    return res.status(500).json({ success: false, message: 'Error interno gestionando cita.' });
   } finally {
     if (client) client.release();
   }
