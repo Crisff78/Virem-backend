@@ -2,6 +2,10 @@ const express = require("express");
 const { randomUUID } = require("crypto");
 const pool = require("../config/db");
 const { requireAuth } = require("./middleware/auth");
+const {
+  ensureUserProfileTable,
+  isSupportedImageUri,
+} = require("../services/user-profile.store");
 
 const router = express.Router();
 
@@ -93,6 +97,8 @@ async function resolveEspecialidadId(client, especialidadValue) {
 // ===============================
 router.get("/", requireAuth, async (_req, res) => {
   try {
+    await ensureUserProfileTable();
+
     const result = await pool.query(
       `SELECT
          m.medicoid::text AS "medicoid",
@@ -104,12 +110,29 @@ router.get("/", requireAuth, async (_req, res) => {
          m.consultorio,
          m.especialidadid,
          COALESCE(e.nombre, 'Medicina General') AS "especialidad",
+         mp.foto_url AS "fotoUrl",
          m.fecharegistro
        FROM medico m
        LEFT JOIN especialidad e ON e.especialidadid = m.especialidadid
+       LEFT JOIN LATERAL (
+         SELECT up.foto_url
+         FROM usuario_perfil up
+         WHERE (
+           COALESCE(up.meta_json->>'medicoid', up.meta_json->>'medicoId', '') = m.medicoid::text
+           OR up.usuarioid::text = m.medicoid::text
+         )
+         ORDER BY up.updated_at DESC
+         LIMIT 1
+       ) mp ON TRUE
        ORDER BY m.fecharegistro DESC, m.medicoid DESC`
     );
-    return res.json({ success: true, medicos: result.rows });
+    const medicos = result.rows.map((row) => ({
+      ...row,
+      fotoUrl: isSupportedImageUri(row.fotoUrl || null)
+        ? String(row.fotoUrl || "").trim() || null
+        : null,
+    }));
+    return res.json({ success: true, medicos });
   } catch (err) {
     console.error("Error GET /medicos:", err);
     return res.status(500).json({ success: false, message: "Error interno listando medicos." });
@@ -154,6 +177,8 @@ router.get("/especialidades", requireAuth, async (_req, res) => {
 // ===============================
 router.get("/:id", requireAuth, async (req, res) => {
   try {
+    await ensureUserProfileTable();
+
     const result = await pool.query(
       `SELECT
          m.medicoid::text AS "medicoid",
@@ -165,9 +190,20 @@ router.get("/:id", requireAuth, async (req, res) => {
          m.consultorio,
          m.especialidadid,
          COALESCE(e.nombre, 'Medicina General') AS "especialidad",
+         mp.foto_url AS "fotoUrl",
          m.fecharegistro
        FROM medico m
        LEFT JOIN especialidad e ON e.especialidadid = m.especialidadid
+       LEFT JOIN LATERAL (
+         SELECT up.foto_url
+         FROM usuario_perfil up
+         WHERE (
+           COALESCE(up.meta_json->>'medicoid', up.meta_json->>'medicoId', '') = m.medicoid::text
+           OR up.usuarioid::text = m.medicoid::text
+         )
+         ORDER BY up.updated_at DESC
+         LIMIT 1
+       ) mp ON TRUE
        WHERE m.medicoid::text = $1::text
        LIMIT 1`,
       [String(req.params.id)]
@@ -177,7 +213,14 @@ router.get("/:id", requireAuth, async (req, res) => {
       return res.status(404).json({ success: false, message: "Medico no encontrado." });
     }
 
-    return res.json({ success: true, medico: result.rows[0] });
+    const medico = {
+      ...result.rows[0],
+      fotoUrl: isSupportedImageUri(result.rows[0].fotoUrl || null)
+        ? String(result.rows[0].fotoUrl || "").trim() || null
+        : null,
+    };
+
+    return res.json({ success: true, medico });
   } catch (err) {
     console.error("Error GET /medicos/:id:", err);
     return res.status(500).json({ success: false, message: "Error interno obteniendo medico." });
