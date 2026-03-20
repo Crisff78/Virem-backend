@@ -110,6 +110,8 @@ router.get("/", requireAuth, async (_req, res) => {
          m.consultorio,
          m.especialidadid,
          COALESCE(e.nombre, 'Medicina General') AS "especialidad",
+         COALESCE(e.permite_presencial, TRUE) AS "permitePresencial",
+         COALESCE(e.permite_virtual, TRUE) AS "permiteVirtual",
          mp.foto_url AS "fotoUrl",
          m.fecharegistro
        FROM medico m
@@ -128,6 +130,8 @@ router.get("/", requireAuth, async (_req, res) => {
     );
     const medicos = result.rows.map((row) => ({
       ...row,
+      permitePresencial: Boolean(row.permitePresencial),
+      permiteVirtual: Boolean(row.permiteVirtual),
       fotoUrl: isSupportedImageUri(row.fotoUrl || null)
         ? String(row.fotoUrl || "").trim() || null
         : null,
@@ -149,10 +153,12 @@ router.get("/especialidades", requireAuth, async (_req, res) => {
       `SELECT
          e.especialidadid,
          e.nombre,
+         e.permite_presencial,
+         e.permite_virtual,
          COUNT(m.medicoid) FILTER (WHERE m.medicoid IS NOT NULL)::int AS total_medicos
        FROM especialidad e
        LEFT JOIN medico m ON m.especialidadid = e.especialidadid
-       GROUP BY e.especialidadid, e.nombre
+       GROUP BY e.especialidadid, e.nombre, e.permite_presencial, e.permite_virtual
        ORDER BY lower(e.nombre) ASC`
     );
     return res.json({
@@ -160,6 +166,8 @@ router.get("/especialidades", requireAuth, async (_req, res) => {
       especialidades: result.rows.map((row) => ({
         especialidadid: Number(row.especialidadid),
         nombre: String(row.nombre || "").trim(),
+        permitePresencial: Boolean(row.permite_presencial),
+        permiteVirtual: Boolean(row.permite_virtual),
         totalMedicos: Number(row.total_medicos || 0),
       })),
     });
@@ -190,6 +198,8 @@ router.get("/:id", requireAuth, async (req, res) => {
          m.consultorio,
          m.especialidadid,
          COALESCE(e.nombre, 'Medicina General') AS "especialidad",
+         COALESCE(e.permite_presencial, TRUE) AS "permitePresencial",
+         COALESCE(e.permite_virtual, TRUE) AS "permiteVirtual",
          mp.foto_url AS "fotoUrl",
          m.fecharegistro
        FROM medico m
@@ -215,6 +225,8 @@ router.get("/:id", requireAuth, async (req, res) => {
 
     const medico = {
       ...result.rows[0],
+      permitePresencial: Boolean(result.rows[0].permitePresencial),
+      permiteVirtual: Boolean(result.rows[0].permiteVirtual),
       fotoUrl: isSupportedImageUri(result.rows[0].fotoUrl || null)
         ? String(result.rows[0].fotoUrl || "").trim() || null
         : null,

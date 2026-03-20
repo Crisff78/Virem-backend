@@ -1,9 +1,12 @@
 const express = require("express");
 const cors = require("cors");
+const http = require("http");
 require("dotenv").config();
 const pool = require("./config/db");
+const { initializeSocketServer } = require("./realtime/socket");
 
 const app = express();
+const httpServer = http.createServer(app);
 
 // Middlewares
 app.use(cors());
@@ -79,6 +82,12 @@ app.use("/api", phoneRoutes);
 const exequaturRoutes = require("./routes/exequatur.routes.js");
 app.use("/api", exequaturRoutes);
 
+// ===============================
+// ✅ RUTAS AGENDA / TIEMPO REAL
+// ===============================
+const agendaRoutes = require("./routes/agenda.routes.js");
+app.use("/api/agenda", agendaRoutes);
+
 
 // Catch-all
 app.use((req, res) => {
@@ -89,6 +98,8 @@ app.use((req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, "0.0.0.0", () => {
+initializeSocketServer(httpServer);
+
+httpServer.listen(PORT, "0.0.0.0", () => {
   console.log(`🚀 Backend corriendo en http://localhost:${PORT}`);
 });
