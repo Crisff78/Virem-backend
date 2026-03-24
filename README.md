@@ -17,6 +17,21 @@ Backend en Node.js + Express + PostgreSQL para autenticacion, agenda medica, cha
 - Desarrollo: `npm run dev`
 - Produccion: `npm start`
 
+## Pruebas
+- Funcional (smoke): `npm run test:functional:smoke`
+- Rendimiento (base): `npm run test:performance`
+- Reportes generados en `backend/reports/`
+
+> Nota: para ejecutar pruebas funcionales/rendimiento, el backend debe estar levantado.
+
+## CI/CD (GitHub Actions)
+- CI backend: `.github/workflows/ci.yml`
+- Deploy parcial/simulado: `.github/workflows/deploy-partial.yml`
+
+Secrets opcionales para deploy real:
+- `RENDER_DEPLOY_HOOK_URL_BACKEND`
+- `BACKEND_HEALTHCHECK_URL`
+
 ## Endpoints principales
 
 ### Salud

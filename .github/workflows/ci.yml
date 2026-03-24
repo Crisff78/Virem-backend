@@ -1,0 +1,69 @@
+name: Backend CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Start backend
+        run: |
+          node index.js > backend.log 2>&1 &
+          echo $! > backend.pid
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:3000/health > /dev/null; then
+              echo "Backend listo"
+              break
+            fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:3000/health > /dev/null
+
+      - name: Functional smoke test
+        run: npm run test:functional:smoke
+
+      - name: Performance test (base)
+        env:
+          PERF_DURATION: 5
+          PERF_CONNECTIONS: 10
+          MAX_AVG_LATENCY_MS: 700
+          MAX_ERROR_RATE: 2
+        run: npm run test:performance
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-test-reports
+          path: |
+            reports/*.json
+            backend.log
+
+      - name: Stop backend
+        if: always()
+        run: |
+          if [ -f backend.pid ]; then
+            kill $(cat backend.pid) || true
+          fi
+          tail -n 120 backend.log || true

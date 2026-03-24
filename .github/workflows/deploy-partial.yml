@@ -1,0 +1,39 @@
+name: Backend Deploy Partial
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger deploy hook or simulate
+        env:
+          DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL_BACKEND }}
+        run: |
+          if [ -z "$DEPLOY_HOOK_URL" ]; then
+            echo "No existe secret RENDER_DEPLOY_HOOK_URL_BACKEND."
+            echo "Ejecucion en modo simulacion (despliegue parcial)."
+            exit 0
+          fi
+
+          echo "Invocando deploy hook del backend..."
+          curl -fsS -X POST "$DEPLOY_HOOK_URL"
+          echo "Deploy hook ejecutado correctamente."
+
+      - name: Healthcheck post deploy (opcional)
+        env:
+          HEALTHCHECK_URL: ${{ secrets.BACKEND_HEALTHCHECK_URL }}
+        run: |
+          if [ -z "$HEALTHCHECK_URL" ]; then
+            echo "No existe secret BACKEND_HEALTHCHECK_URL. Saltando healthcheck."
+            exit 0
+          fi
+
+          echo "Validando endpoint de salud..."
+          curl -fsS "$HEALTHCHECK_URL"
+          echo "Healthcheck OK."
