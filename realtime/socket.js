@@ -2,6 +2,7 @@ const jwt = require("jsonwebtoken");
 const { Server } = require("socket.io");
 const pool = require("../config/db");
 const { getUserProfileById } = require("../services/user-profile.store");
+const { getSocketCorsOrigins } = require("../config/env");
 
 let ioInstance = null;
 
@@ -199,8 +200,9 @@ function initializeSocketServer(httpServer) {
 
   ioInstance = new Server(httpServer, {
     cors: {
-      origin: "*",
+      origin: getSocketCorsOrigins(),
       methods: ["GET", "POST"],
+      credentials: true,
     },
   });
 

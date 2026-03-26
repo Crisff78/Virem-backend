@@ -165,6 +165,46 @@ function getRecoveryTransporter() {
   return recoveryTransporterCache;
 }
 
+function allowConsoleEmailFallback() {
+  return String(process.env.EMAIL_FALLBACK_TO_CONSOLE || "false") === "true";
+}
+
+function trimTrailingSlash(url) {
+  return String(url || "").replace(/\/+$/, "");
+}
+
+function resolvePublicBackendUrl() {
+  const explicit = String(
+    process.env.PUBLIC_BACKEND_URL ||
+      process.env.BACKEND_PUBLIC_URL ||
+      process.env.APP_BASE_URL ||
+      ""
+  ).trim();
+  if (explicit) return trimTrailingSlash(explicit);
+  const port = Number.parseInt(String(process.env.PORT || "3000"), 10) || 3000;
+  return `http://localhost:${port}`;
+}
+
+function resolvePublicWebUrl() {
+  const explicit = String(
+    process.env.PUBLIC_WEB_URL ||
+      process.env.WEB_PUBLIC_URL ||
+      process.env.FRONTEND_PUBLIC_URL ||
+      process.env.EXPO_PUBLIC_FRONTEND_URL ||
+      ""
+  ).trim();
+  return explicit ? trimTrailingSlash(explicit) : "";
+}
+
+function buildEmailVerificationLink(email, code) {
+  const backendUrl = resolvePublicBackendUrl();
+  return (
+    `${backendUrl}/api/auth/verify-email-link` +
+    `?email=${encodeURIComponent(String(email || "").trim().toLowerCase())}` +
+    `&codigo=${encodeURIComponent(String(code || "").trim())}`
+  );
+}
+
 async function sendRecoveryCodeEmail({ email, code }) {
   const transporter = getRecoveryTransporter();
   const fromEmail =
@@ -174,9 +214,9 @@ async function sendRecoveryCodeEmail({ email, code }) {
     "no-reply@virem.local";
 
   if (!transporter) {
-    if (String(process.env.NODE_ENV || "development") === "production") {
+    if (!allowConsoleEmailFallback()) {
       throw new Error(
-        "SMTP no configurado. Define SMTP_URL o SMTP_HOST/SMTP_USER/SMTP_PASS."
+        "SMTP no configurado. Define SMTP_URL o SMTP_HOST/SMTP_USER/SMTP_PASS. Si quieres modo consola, usa EMAIL_FALLBACK_TO_CONSOLE=true."
       );
     }
 
@@ -197,6 +237,7 @@ async function sendRecoveryCodeEmail({ email, code }) {
 
 async function sendEmailVerificationCodeEmail({ email, code }) {
   const transporter = getRecoveryTransporter();
+  const verificationLink = buildEmailVerificationLink(email, code);
   const fromEmail =
     String(process.env.VERIFICATION_EMAIL_FROM || "").trim() ||
     String(process.env.RECOVERY_EMAIL_FROM || "").trim() ||
@@ -205,9 +246,9 @@ async function sendEmailVerificationCodeEmail({ email, code }) {
     "no-reply@virem.local";
 
   if (!transporter) {
-    if (String(process.env.NODE_ENV || "development") === "production") {
+    if (!allowConsoleEmailFallback()) {
       throw new Error(
-        "SMTP no configurado. Define SMTP_URL o SMTP_HOST/SMTP_USER/SMTP_PASS."
+        "SMTP no configurado. Define SMTP_URL o SMTP_HOST/SMTP_USER/SMTP_PASS. Si quieres modo consola, usa EMAIL_FALLBACK_TO_CONSOLE=true."
       );
     }
 
@@ -219,8 +260,15 @@ async function sendEmailVerificationCodeEmail({ email, code }) {
     from: fromEmail,
     to: email,
     subject: "Verifica tu correo - VIREM",
-    text: `Tu codigo de verificacion es: ${code}. Expira en ${EMAIL_CODE_TTL_MINUTES} minutos.`,
-    html: `<p>Tu codigo de verificacion es:</p><p><strong style=\"font-size:20px;letter-spacing:2px;\">${code}</strong></p><p>Expira en ${EMAIL_CODE_TTL_MINUTES} minutos.</p>`,
+    text:
+      `Tu codigo de verificacion es: ${code}. ` +
+      `Expira en ${EMAIL_CODE_TTL_MINUTES} minutos.\n\n` +
+      `Tambien puedes verificar haciendo clic aqui:\n${verificationLink}`,
+    html:
+      `<p>Tu codigo de verificacion es:</p>` +
+      `<p><strong style=\"font-size:20px;letter-spacing:2px;\">${code}</strong></p>` +
+      `<p>Expira en ${EMAIL_CODE_TTL_MINUTES} minutos.</p>` +
+      `<p><a href=\"${verificationLink}\">Haz clic aqui para verificar tu correo</a></p>`,
   });
 
   return { delivered: true };
@@ -1212,6 +1260,122 @@ router.post("/register-medico", async (req, res) => {
   }
 });
 
+function renderEmailVerificationPage({
+  title,
+  message,
+  success = false,
+  loginUrl = "",
+}) {
+  const safeTitle = String(title || "").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const safeMessage = String(message || "").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const safeLoginUrl = String(loginUrl || "").trim();
+  const accent = success ? "#16a34a" : "#dc2626";
+
+  return `<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>${safeTitle}</title>
+    <style>
+      body{font-family:Arial,sans-serif;background:#f4f8fb;margin:0;padding:0}
+      .wrap{max-width:520px;margin:56px auto;background:#fff;border-radius:14px;padding:28px;border:1px solid #e5edf4}
+      h1{margin:0 0 10px 0;color:#0a1931;font-size:24px}
+      p{margin:0 0 16px 0;color:#334155;line-height:1.5}
+      .bar{height:4px;background:${accent};border-radius:999px;margin-bottom:16px}
+      a.btn{display:inline-block;text-decoration:none;background:#137fec;color:#fff;padding:10px 16px;border-radius:10px;font-weight:700}
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="bar"></div>
+      <h1>${safeTitle}</h1>
+      <p>${safeMessage}</p>
+      ${safeLoginUrl ? `<a class="btn" href="${safeLoginUrl}">Ir al login</a>` : ""}
+    </div>
+  </body>
+</html>`;
+}
+
+/**
+ * ===============================
+ * GET /api/auth/verify-email-link
+ * Verifica correo desde enlace enviado por email
+ * ===============================
+ */
+router.get("/verify-email-link", async (req, res) => {
+  const email = String(req.query?.email || "")
+    .toLowerCase()
+    .trim();
+  const codigo = String(req.query?.codigo || req.query?.code || "").trim();
+  const loginUrl = resolvePublicWebUrl();
+
+  if (!isValidEmail(email) || !/^\d{6}$/.test(codigo)) {
+    return res
+      .status(400)
+      .set("Content-Type", "text/html; charset=utf-8")
+      .send(
+        renderEmailVerificationPage({
+          title: "Enlace invalido",
+          message:
+            "El enlace de verificacion no es valido o ya no contiene un codigo correcto.",
+          success: false,
+          loginUrl,
+        })
+      );
+  }
+
+  let client;
+  try {
+    await ensureRfCoreSchema();
+    client = await pool.connect();
+
+    const verification = await verifyEmailVerificationCode(client, { email, code: codigo });
+    if (!verification?.success) {
+      return res
+        .status(400)
+        .set("Content-Type", "text/html; charset=utf-8")
+        .send(
+          renderEmailVerificationPage({
+            title: "No se pudo verificar",
+            message:
+              verification?.message ||
+              "Tu codigo no pudo validarse. Solicita un nuevo codigo de verificacion.",
+            success: false,
+            loginUrl,
+          })
+        );
+    }
+
+    return res
+      .status(200)
+      .set("Content-Type", "text/html; charset=utf-8")
+      .send(
+        renderEmailVerificationPage({
+          title: "Correo verificado",
+          message: "Tu cuenta ya fue verificada. Puedes iniciar sesion.",
+          success: true,
+          loginUrl,
+        })
+      );
+  } catch (err) {
+    return res
+      .status(500)
+      .set("Content-Type", "text/html; charset=utf-8")
+      .send(
+        renderEmailVerificationPage({
+          title: "Error interno",
+          message:
+            "Ocurrio un error procesando la verificacion. Intenta de nuevo en unos minutos.",
+          success: false,
+          loginUrl,
+        })
+      );
+  } finally {
+    if (client) client.release();
+  }
+});
+
 /**
  * ===============================
  * POST /api/auth/verify-email
@@ -1356,6 +1520,7 @@ router.post("/resend-verification", async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "No se pudo reenviar el codigo de verificacion.",
+      error: err?.message || String(err),
     });
   } finally {
     if (client) client.release();

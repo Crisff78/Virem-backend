@@ -10,6 +10,23 @@ Backend en Node.js + Express + PostgreSQL para autenticacion, agenda medica, cha
 1. Instalar dependencias:
    - `npm install`
 2. Configurar variables en `.env` (DB, JWT, CORS, etc).
+   - Para verificacion por correo real (sin consola), agrega SMTP:
+     - `SMTP_HOST=...`
+     - `SMTP_PORT=587`
+     - `SMTP_SECURE=false`
+     - `SMTP_USER=...`
+     - `SMTP_PASS=...`
+     - `SMTP_FROM=...`
+     - `PUBLIC_BACKEND_URL=http://localhost:3000` (o URL publica real)
+     - `PUBLIC_WEB_URL=http://localhost:8081` (opcional, para boton de login en pagina de verificacion)
+      - `EMAIL_FALLBACK_TO_CONSOLE=false`
+   - Variables recomendadas para endurecimiento en produccion:
+      - `NODE_ENV=production`
+      - `JWT_SECRET=<minimo_32_caracteres>`
+      - `CORS_ORIGIN=https://tu-frontend.com,https://admin.tu-frontend.com`
+      - `GLOBAL_RATE_LIMIT_WINDOW_MS=60000`
+      - `GLOBAL_RATE_LIMIT_MAX=180`
+      - `MAX_JSON_BODY=1mb`
 3. Ejecutar migraciones:
    - `npm run migrate:agenda`
 
@@ -42,6 +59,7 @@ Secrets opcionales para deploy real:
 - `POST /api/auth/login`
 - `GET /api/auth/me`
 - `POST /api/auth/verify-email`
+- `GET /api/auth/verify-email-link?email=...&codigo=...`
 - `POST /api/auth/resend-verification`
 
 ### Agenda y tiempo real
@@ -108,3 +126,12 @@ Eventos emitidos:
 ## Notas
 - Se evita doble reserva con validacion de backend y un indice unico parcial (`uq_cita_medico_inicio_activa`) cuando no existen conflictos previos.
 - `JITSI_BASE_URL` permite cambiar el proveedor base para salas Jitsi.
+- El backend ahora valida configuracion critica al iniciar (`JWT_SECRET` y DB), aplica cabeceras de seguridad, rate limit global, CORS con allowlist y trazabilidad por `x-request-id`.
+
+## Checklist de rollout seguro (produccion)
+1. Definir `JWT_SECRET` robusto (>= 32 caracteres).
+2. Configurar `CORS_ORIGIN` con dominios reales (sin wildcard).
+3. Ajustar `GLOBAL_RATE_LIMIT_MAX` segun capacidad de infraestructura.
+4. Mantener `MAX_JSON_BODY` bajo (recomendado `1mb`, subir solo si es estrictamente necesario).
+5. Verificar que `/health` responda correctamente despues del deploy.
+6. Ejecutar `npm run test:functional:smoke` y `npm run test:performance` en ambiente destino.
