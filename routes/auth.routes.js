@@ -17,6 +17,7 @@ const {
   EMAIL_CODE_TTL_MINUTES,
   ensureRfCoreSchema,
   resolveLoginAccessState,
+  normalizeAccountStatus,
   createEmailVerificationCode,
   verifyEmailVerificationCode,
   saveMedicoDocument,

@@ -77,6 +77,7 @@ app.use("/api/pacientes", pacientesRoutes);
 // ===============================
 const phoneRoutes = require("./routes/phone.routes.js");
 app.use("/api", phoneRoutes);
+app.use("/api/phone", phoneRoutes);
 
 // ===============================
 // ✅ RUTA VALIDAR EXEQUÁTUR (SNS)
