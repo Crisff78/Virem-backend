@@ -9,6 +9,10 @@ const {
   isSupportedImageUri,
   MAX_PHOTO_URL_LENGTH,
 } = require('../services/user-profile.store');
+const {
+  ensureRfCoreSchema,
+  recordUserModification,
+} = require('../services/rf-core');
 const { requireAuth } = require('./middleware/auth');
 
 const router = express.Router();
@@ -77,6 +81,17 @@ function normalizeComparableText(value) {
     .replace(/\s+/g, ' ')
     .trim()
     .toLowerCase();
+}
+
+function isStrongPassword(password) {
+  const value = String(password || '');
+  return (
+    value.length >= 8 &&
+    /[a-z]/.test(value) &&
+    /[A-Z]/.test(value) &&
+    /\d/.test(value) &&
+    /[^A-Za-z0-9]/.test(value)
+  );
 }
 
 function toSqlDate(rawValue) {
@@ -622,33 +637,93 @@ router.get('/me', requireAuth, async (req, res) => {
 // Endpoint: PUT /api/users/me
 // ===============================
 router.put('/me', requireAuth, async (req, res) => {
-  const { email } = req.body;
+  const { email, confirmPassword, motivo } = req.body || {};
 
   if (!email) {
     return res.status(400).json({ success: false, message: 'Email es obligatorio.' });
   }
+  if (!confirmPassword) {
+    return res.status(400).json({
+      success: false,
+      message: 'Debes confirmar tu contrasena actual para cambiar el correo.',
+    });
+  }
 
+  let client;
   try {
-    const normalizedEmail = String(email).toLowerCase().trim();
+    await ensureRfCoreSchema();
+    client = await pool.connect();
+    await client.query('BEGIN');
 
-    const existing = await pool.query(
+    const normalizedEmail = String(email).toLowerCase().trim();
+    const currentUser = await client.query(
+      `SELECT usuarioid, email, passwordhash, rolid, activo, fechacreacion
+       FROM usuario
+       WHERE usuarioid = $1
+       LIMIT 1
+       FOR UPDATE`,
+      [req.user.usuarioid]
+    );
+    if (!currentUser.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ success: false, message: 'Usuario no encontrado.' });
+    }
+
+    const userRow = currentUser.rows[0];
+    if (!Boolean(userRow.activo)) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ success: false, message: 'Usuario inactivo.' });
+    }
+
+    const passwordOk = await bcrypt.compare(
+      String(confirmPassword),
+      String(userRow.passwordhash || '')
+    );
+    if (!passwordOk) {
+      await client.query('ROLLBACK');
+      return res.status(401).json({
+        success: false,
+        message: 'Contrasena de confirmacion invalida.',
+      });
+    }
+
+    const existing = await client.query(
       `SELECT usuarioid FROM usuario WHERE email = $1 AND usuarioid <> $2`,
       [normalizedEmail, req.user.usuarioid]
     );
 
     if (existing.rows.length > 0) {
+      await client.query('ROLLBACK');
       return res.status(409).json({ success: false, message: 'Ese correo ya está registrado.' });
     }
 
-    const result = await pool.query(
+    const result = await client.query(
       `UPDATE usuario
        SET email = $1
        WHERE usuarioid = $2
-       RETURNING usuarioid, rolid, email, fechacreacion, activo`,
+       RETURNING usuarioid, rolid, email, fechacreacion, activo, account_status, email_verificado`,
       [normalizedEmail, req.user.usuarioid]
     );
 
-    const profile = await getUserProfileById(pool, req.user.usuarioid);
+    const previousEmail = String(userRow.email || '').trim();
+    if (previousEmail.toLowerCase() !== normalizedEmail.toLowerCase()) {
+      await recordUserModification(client, {
+        usuarioid: Number(req.user.usuarioid),
+        actorUsuarioid: Number(req.user.usuarioid),
+        scope: 'email_sensible',
+        motivo: String(motivo || '').trim(),
+        changes: {
+          email: {
+            before: previousEmail,
+            after: normalizedEmail,
+          },
+        },
+      });
+    }
+
+    await client.query('COMMIT');
+
+    const profile = await getUserProfileById(client, req.user.usuarioid);
     return res.json({
       success: true,
       user: {
@@ -657,8 +732,15 @@ router.put('/me', requireAuth, async (req, res) => {
       },
     });
   } catch (err) {
+    if (client) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (_) {}
+    }
     console.error('Error PUT /users/me:', err);
     return res.status(500).json({ success: false, message: 'Error interno actualizando usuario.' });
+  } finally {
+    if (client) client.release();
   }
 });
 
@@ -717,9 +799,28 @@ router.put('/me/profile', requireAuth, async (req, res) => {
   }
 
   try {
+    await ensureRfCoreSchema();
+    const currentProfile = await getUserProfileById(pool, req.user.usuarioid);
     const profile = await upsertUserProfileById(pool, req.user.usuarioid, {
       fotoUrl: fotoUrl || null,
     });
+
+    const before = String(currentProfile?.fotoUrl || '').trim();
+    const after = String(profile?.fotoUrl || '').trim();
+    if (before !== after) {
+      await recordUserModification(pool, {
+        usuarioid: Number(req.user.usuarioid),
+        actorUsuarioid: Number(req.user.usuarioid),
+        scope: 'foto_perfil',
+        changes: {
+          fotoUrl: {
+            before: before || null,
+            after: after || null,
+          },
+        },
+      });
+    }
+
     return res.json({
       success: true,
       message: 'Foto de perfil actualizada.',
@@ -824,11 +925,12 @@ router.put('/me/paciente-profile', requireAuth, async (req, res) => {
   const body = req.body || {};
   let client;
   try {
+    await ensureRfCoreSchema();
     client = await pool.connect();
     await client.query('BEGIN');
 
     const userResult = await client.query(
-      `SELECT usuarioid, rolid, email, activo, fechacreacion
+      `SELECT usuarioid, rolid, email, activo, fechacreacion, passwordhash
        FROM usuario
        WHERE usuarioid = $1
        LIMIT 1`,
@@ -901,6 +1003,29 @@ router.put('/me/paciente-profile', requireAuth, async (req, res) => {
       });
     }
 
+    const previousEmail = String(user.email || '').toLowerCase().trim();
+    const previousCedula = String(paciente.cedula || '')
+      .replace(/\D/g, '')
+      .slice(0, 11);
+    const previousTelefono = String(paciente.telefono || '')
+      .replace(/\D/g, '')
+      .slice(0, 15);
+    const previousFechaNacimiento = toSqlDate(paciente.fechanacimiento);
+
+    const sensitiveChanges = {};
+    const registerSensitiveChange = (field, before, after) => {
+      if (String(before || '') === String(after || '')) return;
+      sensitiveChanges[field] = { before, after };
+    };
+
+    registerSensitiveChange('cedula', previousCedula, nextCedula);
+    registerSensitiveChange('telefono', previousTelefono, nextTelefono);
+    registerSensitiveChange(
+      'fechanacimiento',
+      previousFechaNacimiento,
+      nextFechaNacimiento
+    );
+
     const emailProvided = Object.prototype.hasOwnProperty.call(body, 'email');
     let nextEmail = String(user.email || '').toLowerCase().trim();
     if (emailProvided) {
@@ -928,6 +1053,33 @@ router.put('/me/paciente-profile', requireAuth, async (req, res) => {
          WHERE usuarioid = $2`,
         [nextEmail, user.usuarioid]
       );
+    }
+
+    registerSensitiveChange('email', previousEmail, nextEmail);
+
+    const hasSensitiveChanges = Object.keys(sensitiveChanges).length > 0;
+    if (hasSensitiveChanges) {
+      const confirmPassword = String(body.confirmPassword || '').trim();
+      if (!confirmPassword) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          success: false,
+          message:
+            'Debes confirmar tu contrasena actual para guardar cambios sensibles.',
+        });
+      }
+
+      const passwordOk = await bcrypt.compare(
+        confirmPassword,
+        String(user.passwordhash || '')
+      );
+      if (!passwordOk) {
+        await client.query('ROLLBACK');
+        return res.status(401).json({
+          success: false,
+          message: 'Contrasena de confirmacion invalida.',
+        });
+      }
     }
 
     const updatePaciente = await client.query(
@@ -1000,6 +1152,55 @@ router.put('/me/paciente-profile', requireAuth, async (req, res) => {
     const savedProfile = await upsertUserProfileById(client, user.usuarioid, {
       meta: mergedMeta,
     });
+
+    const profileChanges = {
+      ...sensitiveChanges,
+    };
+    const addChange = (field, before, after) => {
+      if (String(before || '') === String(after || '')) return;
+      profileChanges[field] = { before, after };
+    };
+
+    addChange('nombres', paciente.nombres, nextNombres);
+    addChange('apellidos', paciente.apellidos, nextApellidos);
+    addChange('genero', paciente.genero, nextGenero);
+    addChange('direccion', currentMeta.direccion, mergedMeta.direccion);
+    addChange('tipoSangre', currentMeta.tipoSangre, mergedMeta.tipoSangre);
+    addChange('alergias', currentMeta.alergias, mergedMeta.alergias);
+    addChange('medicamentos', currentMeta.medicamentos, mergedMeta.medicamentos);
+    addChange('antecedentes', currentMeta.antecedentes, mergedMeta.antecedentes);
+    addChange(
+      'contactoEmergenciaNombre',
+      currentMeta.contactoEmergenciaNombre,
+      mergedMeta.contactoEmergenciaNombre
+    );
+    addChange(
+      'contactoEmergenciaTelefono',
+      currentMeta.contactoEmergenciaTelefono,
+      mergedMeta.contactoEmergenciaTelefono
+    );
+    addChange(
+      'contactoEmergenciaParentesco',
+      currentMeta.contactoEmergenciaParentesco,
+      mergedMeta.contactoEmergenciaParentesco
+    );
+    addChange('recibirEmail', currentMeta.recibirEmail, mergedMeta.recibirEmail);
+    addChange('recibirSMS', currentMeta.recibirSMS, mergedMeta.recibirSMS);
+    addChange(
+      'compartirHistorial',
+      currentMeta.compartirHistorial,
+      mergedMeta.compartirHistorial
+    );
+
+    if (Object.keys(profileChanges).length > 0) {
+      await recordUserModification(client, {
+        usuarioid: Number(user.usuarioid),
+        actorUsuarioid: Number(req.user.usuarioid),
+        scope: 'paciente_profile',
+        motivo: String(body.motivo || '').trim(),
+        changes: profileChanges,
+      });
+    }
 
     await client.query('COMMIT');
 
@@ -1910,8 +2111,16 @@ router.put('/me/password', requireAuth, async (req, res) => {
       .status(400)
       .json({ success: false, message: 'currentPassword y newPassword son obligatorios.' });
   }
+  if (!isStrongPassword(newPassword)) {
+    return res.status(400).json({
+      success: false,
+      message:
+        'La contrasena debe tener al menos 8 caracteres, mayuscula, minuscula, numero y simbolo.',
+    });
+  }
 
   try {
+    await ensureRfCoreSchema();
     const result = await pool.query(
       `SELECT passwordhash FROM usuario WHERE usuarioid = $1`,
       [req.user.usuarioid]
@@ -1931,6 +2140,18 @@ router.put('/me/password', requireAuth, async (req, res) => {
       newHash,
       req.user.usuarioid,
     ]);
+
+    await recordUserModification(pool, {
+      usuarioid: Number(req.user.usuarioid),
+      actorUsuarioid: Number(req.user.usuarioid),
+      scope: 'password',
+      changes: {
+        password: {
+          before: '***',
+          after: '***',
+        },
+      },
+    });
 
     return res.json({ success: true, message: 'Contraseña actualizada.' });
   } catch (err) {

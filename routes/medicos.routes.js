@@ -6,6 +6,8 @@ const {
   ensureUserProfileTable,
   isSupportedImageUri,
 } = require("../services/user-profile.store");
+const { ensurePlatformSchema } = require("../services/platform-core");
+const { ensureRfCoreSchema } = require("../services/rf-core");
 
 const router = express.Router();
 
@@ -95,12 +97,71 @@ async function resolveEspecialidadId(client, especialidadValue) {
 // API: Listar medicos
 // Endpoint: GET /api/medicos
 // ===============================
-router.get("/", requireAuth, async (_req, res) => {
+router.get("/", requireAuth, async (req, res) => {
+  const especialidadQuery = String(req.query?.especialidad || "").trim();
+  const ubicacionQuery = String(req.query?.ubicacion || "").trim();
+  const modalidadQuery = normalizeComparableText(req.query?.modalidad || "");
+  const minRatingRaw = Number(req.query?.minRating);
+  const minRating = Number.isFinite(minRatingRaw) ? Number(minRatingRaw) : null;
+  const onlyAvailable = ["1", "true", "si", "yes"].includes(
+    String(req.query?.disponible || "").toLowerCase().trim()
+  );
+
   try {
     await ensureUserProfileTable();
+    await ensurePlatformSchema();
+    await ensureRfCoreSchema();
+
+    const filters = [];
+    const params = [];
+
+    if (especialidadQuery) {
+      params.push(especialidadQuery, `%${especialidadQuery}%`);
+      filters.push(
+        `(lower(COALESCE(e.nombre, '')) = lower($${params.length - 1}) OR lower(COALESCE(e.nombre, '')) LIKE lower($${params.length}))`
+      );
+    }
+    if (ubicacionQuery) {
+      params.push(`%${ubicacionQuery}%`);
+      filters.push(`lower(COALESCE(m.consultorio, '')) LIKE lower($${params.length})`);
+    }
+    if (modalidadQuery === "presencial") {
+      filters.push(`COALESCE(e.permite_presencial, TRUE) = TRUE`);
+    }
+    if (modalidadQuery === "virtual") {
+      filters.push(`COALESCE(e.permite_virtual, TRUE) = TRUE`);
+    }
+    if (Number.isFinite(minRating) && minRating !== null) {
+      params.push(minRating);
+      filters.push(`COALESCE(rv.rating_promedio, 0) >= $${params.length}`);
+    }
+    if (onlyAvailable) {
+      filters.push(`ns.proximo_horario IS NOT NULL`);
+    }
+
+    const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
 
     const result = await pool.query(
-      `SELECT
+      `WITH rating AS (
+         SELECT
+           v.medicoid_text,
+           ROUND(AVG(v.puntaje)::numeric, 2) AS rating_promedio,
+           COUNT(*)::int AS total_valoraciones
+         FROM valoracion v
+         WHERE lower(COALESCE(v.estado_moderacion, 'pendiente')) = 'aprobada'
+         GROUP BY v.medicoid_text
+       ),
+       next_slot AS (
+         SELECT
+           h.medicoid::text AS medicoid_text,
+           MIN(h.fechainicio) AS proximo_horario
+         FROM horario_disponible h
+         WHERE h.activo = TRUE
+           AND h.bloqueado = FALSE
+           AND h.fechafin > NOW()
+         GROUP BY h.medicoid::text
+       )
+       SELECT
          m.medicoid::text AS "medicoid",
          m.nombrecompleto AS "nombreCompleto",
          m.fechanacimiento,
@@ -112,10 +173,15 @@ router.get("/", requireAuth, async (_req, res) => {
          COALESCE(e.nombre, 'Medicina General') AS "especialidad",
          COALESCE(e.permite_presencial, TRUE) AS "permitePresencial",
          COALESCE(e.permite_virtual, TRUE) AS "permiteVirtual",
+         COALESCE(rv.rating_promedio, 0) AS "ratingPromedio",
+         COALESCE(rv.total_valoraciones, 0) AS "totalValoraciones",
+         ns.proximo_horario AS "proximoHorarioDisponible",
          mp.foto_url AS "fotoUrl",
          m.fecharegistro
        FROM medico m
        LEFT JOIN especialidad e ON e.especialidadid = m.especialidadid
+       LEFT JOIN rating rv ON rv.medicoid_text = m.medicoid::text
+       LEFT JOIN next_slot ns ON ns.medicoid_text = m.medicoid::text
        LEFT JOIN LATERAL (
          SELECT up.foto_url
          FROM usuario_perfil up
@@ -126,12 +192,18 @@ router.get("/", requireAuth, async (_req, res) => {
          ORDER BY up.updated_at DESC
          LIMIT 1
        ) mp ON TRUE
+       ${whereClause}
        ORDER BY m.fecharegistro DESC, m.medicoid DESC`
+      ,
+      params
     );
     const medicos = result.rows.map((row) => ({
       ...row,
       permitePresencial: Boolean(row.permitePresencial),
       permiteVirtual: Boolean(row.permiteVirtual),
+      ratingPromedio: Number(row.ratingPromedio || 0),
+      totalValoraciones: Number(row.totalValoraciones || 0),
+      proximoHorarioDisponible: row.proximoHorarioDisponible || null,
       fotoUrl: isSupportedImageUri(row.fotoUrl || null)
         ? String(row.fotoUrl || "").trim() || null
         : null,
@@ -186,9 +258,30 @@ router.get("/especialidades", requireAuth, async (_req, res) => {
 router.get("/:id", requireAuth, async (req, res) => {
   try {
     await ensureUserProfileTable();
+    await ensurePlatformSchema();
+    await ensureRfCoreSchema();
 
     const result = await pool.query(
-      `SELECT
+      `WITH rating AS (
+         SELECT
+           v.medicoid_text,
+           ROUND(AVG(v.puntaje)::numeric, 2) AS rating_promedio,
+           COUNT(*)::int AS total_valoraciones
+         FROM valoracion v
+         WHERE lower(COALESCE(v.estado_moderacion, 'pendiente')) = 'aprobada'
+         GROUP BY v.medicoid_text
+       ),
+       next_slot AS (
+         SELECT
+           h.medicoid::text AS medicoid_text,
+           MIN(h.fechainicio) AS proximo_horario
+         FROM horario_disponible h
+         WHERE h.activo = TRUE
+           AND h.bloqueado = FALSE
+           AND h.fechafin > NOW()
+         GROUP BY h.medicoid::text
+       )
+       SELECT
          m.medicoid::text AS "medicoid",
          m.nombrecompleto AS "nombreCompleto",
          m.fechanacimiento,
@@ -200,10 +293,15 @@ router.get("/:id", requireAuth, async (req, res) => {
          COALESCE(e.nombre, 'Medicina General') AS "especialidad",
          COALESCE(e.permite_presencial, TRUE) AS "permitePresencial",
          COALESCE(e.permite_virtual, TRUE) AS "permiteVirtual",
+         COALESCE(rv.rating_promedio, 0) AS "ratingPromedio",
+         COALESCE(rv.total_valoraciones, 0) AS "totalValoraciones",
+         ns.proximo_horario AS "proximoHorarioDisponible",
          mp.foto_url AS "fotoUrl",
          m.fecharegistro
        FROM medico m
        LEFT JOIN especialidad e ON e.especialidadid = m.especialidadid
+       LEFT JOIN rating rv ON rv.medicoid_text = m.medicoid::text
+       LEFT JOIN next_slot ns ON ns.medicoid_text = m.medicoid::text
        LEFT JOIN LATERAL (
          SELECT up.foto_url
          FROM usuario_perfil up
@@ -227,6 +325,9 @@ router.get("/:id", requireAuth, async (req, res) => {
       ...result.rows[0],
       permitePresencial: Boolean(result.rows[0].permitePresencial),
       permiteVirtual: Boolean(result.rows[0].permiteVirtual),
+      ratingPromedio: Number(result.rows[0].ratingPromedio || 0),
+      totalValoraciones: Number(result.rows[0].totalValoraciones || 0),
+      proximoHorarioDisponible: result.rows[0].proximoHorarioDisponible || null,
       fotoUrl: isSupportedImageUri(result.rows[0].fotoUrl || null)
         ? String(result.rows[0].fotoUrl || "").trim() || null
         : null,

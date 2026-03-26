@@ -12,6 +12,15 @@ const {
   MAX_PHOTO_URL_LENGTH,
 } = require("../services/user-profile.store");
 const { requireAuth } = require("./middleware/auth");
+const {
+  ACCOUNT_STATUS,
+  EMAIL_CODE_TTL_MINUTES,
+  ensureRfCoreSchema,
+  resolveLoginAccessState,
+  createEmailVerificationCode,
+  verifyEmailVerificationCode,
+  saveMedicoDocument,
+} = require("../services/rf-core");
 
 const router = express.Router();
 const MEDICO_ROLE_ID = 2;
@@ -180,6 +189,37 @@ async function sendRecoveryCodeEmail({ email, code }) {
     subject: "Codigo de recuperacion - VIREM",
     text: `Tu codigo de recuperacion es: ${code}. Expira en ${RECOVERY_CODE_TTL_MINUTES} minutos.`,
     html: `<p>Tu codigo de recuperacion es:</p><p><strong style="font-size:20px;letter-spacing:2px;">${code}</strong></p><p>Expira en ${RECOVERY_CODE_TTL_MINUTES} minutos.</p>`,
+  });
+
+  return { delivered: true };
+}
+
+async function sendEmailVerificationCodeEmail({ email, code }) {
+  const transporter = getRecoveryTransporter();
+  const fromEmail =
+    String(process.env.VERIFICATION_EMAIL_FROM || "").trim() ||
+    String(process.env.RECOVERY_EMAIL_FROM || "").trim() ||
+    String(process.env.SMTP_FROM || "").trim() ||
+    String(process.env.SMTP_USER || "").trim() ||
+    "no-reply@virem.local";
+
+  if (!transporter) {
+    if (String(process.env.NODE_ENV || "development") === "production") {
+      throw new Error(
+        "SMTP no configurado. Define SMTP_URL o SMTP_HOST/SMTP_USER/SMTP_PASS."
+      );
+    }
+
+    console.warn(`[VERIFY] Codigo para ${email}: ${code}`);
+    return { delivered: false, devCode: code };
+  }
+
+  await transporter.sendMail({
+    from: fromEmail,
+    to: email,
+    subject: "Verifica tu correo - VIREM",
+    text: `Tu codigo de verificacion es: ${code}. Expira en ${EMAIL_CODE_TTL_MINUTES} minutos.`,
+    html: `<p>Tu codigo de verificacion es:</p><p><strong style=\"font-size:20px;letter-spacing:2px;\">${code}</strong></p><p>Expira en ${EMAIL_CODE_TTL_MINUTES} minutos.</p>`,
   });
 
   return { delivered: true };
@@ -605,6 +645,8 @@ async function buildAuthUserPayload(client, userRow) {
     usuarioid: userRow.usuarioid,
     rolid: userRow.rolid,
     email: userRow.email,
+    accountStatus: normalizeAccountStatus(userRow.account_status || "activa"),
+    emailVerificado: Boolean(userRow.email_verificado),
   };
   const userProfile = await getUserProfileById(client, userRow.usuarioid);
   const meta =
@@ -724,9 +766,6 @@ router.post("/register", async (req, res) => {
     password,
   } = req.body;
 
-  console.log("✅ POST /api/auth/register");
-  console.log("📦 BODY:", req.body);
-
   if (
     !nombres ||
     !apellidos ||
@@ -744,15 +783,35 @@ router.post("/register", async (req, res) => {
     });
   }
 
+  const normalizedEmail = String(email || "")
+    .toLowerCase()
+    .trim();
+  if (!isValidEmail(normalizedEmail)) {
+    return res.status(400).json({
+      success: false,
+      message: "Debes enviar un correo valido.",
+    });
+  }
+  if (!isStrongPassword(password)) {
+    return res.status(400).json({
+      success: false,
+      message:
+        "La contrasena debe tener al menos 8 caracteres, mayuscula, minuscula, numero y simbolo.",
+    });
+  }
+
+  const requireEmailVerification =
+    String(process.env.REQUIRE_EMAIL_VERIFICATION || "true") === "true";
+
   const client = await pool.connect();
+  let verificationCodePayload = null;
 
   try {
-    const normalizedEmail = String(email).toLowerCase().trim();
+    await ensureRfCoreSchema();
     const fechaSQL = toSqlDate(fechanacimiento);
 
     await client.query("BEGIN");
 
-    // ✅ Email único
     const existing = await client.query(
       "SELECT usuarioid FROM usuario WHERE email = $1",
       [normalizedEmail]
@@ -762,31 +821,43 @@ router.post("/register", async (req, res) => {
       await client.query("ROLLBACK");
       return res.status(409).json({
         success: false,
-        message: "Ese correo ya está registrado.",
+        message: "Ese correo ya esta registrado.",
       });
     }
 
     const passwordhash = await bcrypt.hash(String(password), 10);
-
-    // ✅ Insert usuario PRIMERO (para evitar problemas de FK raros)
-    const rolid = Number(process.env.DEFAULT_ROLID || 1);
+    const rolid = Number(process.env.DEFAULT_ROLID || PACIENTE_ROLE_ID);
     const activo = String(process.env.DEFAULT_ACTIVO || "true") === "true";
+    const accountStatus = requireEmailVerification
+      ? ACCOUNT_STATUS.PENDING_VERIFICATION
+      : ACCOUNT_STATUS.ACTIVE;
+    const emailVerificado = !requireEmailVerification;
 
     const insertUsuario = await client.query(
-      `INSERT INTO usuario (rolid, email, passwordhash, fechacreacion, activo)
-       VALUES ($1,$2,$3,NOW(),$4)
+      `INSERT INTO usuario (
+         rolid,
+         email,
+         passwordhash,
+         fechacreacion,
+         activo,
+         account_status,
+         email_verificado,
+         email_verificado_at
+       )
+       VALUES ($1,$2,$3,NOW(),$4,$5,$6,CASE WHEN $6 THEN NOW() ELSE NULL END)
        RETURNING usuarioid`,
-      [rolid, normalizedEmail, passwordhash, activo]
+      [
+        rolid,
+        normalizedEmail,
+        passwordhash,
+        activo,
+        accountStatus,
+        emailVerificado,
+      ]
     );
 
     const usuarioid = insertUsuario.rows[0].usuarioid;
 
-    // ✅ Insert paciente (con usuarioid si tu BD lo requiere)
-    // OJO: si tu tabla paciente NO tiene usuarioid, quita esa parte.
-    // Como tu BD tiene fk_usuario: FOREIGN KEY (pacienteid) REFERENCES usuario(usuarioid)
-    // eso es raro, pero lo manejamos con 2 inserts:
-    //   - Insert usuario => usuarioid
-    //   - Insert paciente forzando pacienteid = usuarioid
     const insertPaciente = await client.query(
       `INSERT INTO paciente (pacienteid, nombres, apellidos, fechanacimiento, genero, cedula, telefono, fecharegistro)
        VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
@@ -802,25 +873,41 @@ router.post("/register", async (req, res) => {
       ]
     );
 
+    if (requireEmailVerification) {
+      verificationCodePayload = await createEmailVerificationCode(client, {
+        usuarioid,
+        email: normalizedEmail,
+        ttlMinutes: EMAIL_CODE_TTL_MINUTES,
+      });
+    }
+
     await client.query("COMMIT");
 
-    console.log("✅ REGISTRO OK:", {
-      pacienteid: insertPaciente.rows[0].pacienteid,
-      usuarioid,
-    });
+    let verificationDelivery = null;
+    if (verificationCodePayload) {
+      verificationDelivery = await sendEmailVerificationCodeEmail({
+        email: normalizedEmail,
+        code: verificationCodePayload.codigo,
+      });
+    }
 
     return res.json({
       success: true,
-      message: "Paciente registrado correctamente.",
+      message: requireEmailVerification
+        ? "Paciente registrado. Debes verificar tu correo para activar la cuenta."
+        : "Paciente registrado correctamente.",
       pacienteid: insertPaciente.rows[0].pacienteid,
       usuarioid,
+      accountStatus,
+      requiresEmailVerification: requireEmailVerification,
+      ...(verificationDelivery?.devCode
+        ? { devVerificationCode: verificationDelivery.devCode }
+        : {}),
     });
   } catch (err) {
     try {
       await client.query("ROLLBACK");
     } catch (_) {}
-
-    console.error("❌ Error register paciente:", err);
 
     return res.status(500).json({
       success: false,
@@ -850,6 +937,7 @@ router.post("/register-medico", async (req, res) => {
     email,
     password,
     exequaturValidationToken,
+    documentos,
   } = req.body;
 
   if (
@@ -869,10 +957,66 @@ router.post("/register-medico", async (req, res) => {
     });
   }
 
+  const normalizedEmail = String(email || "")
+    .toLowerCase()
+    .trim();
+  if (!isValidEmail(normalizedEmail)) {
+    return res.status(400).json({
+      success: false,
+      message: "Debes enviar un correo valido.",
+    });
+  }
+  if (!isStrongPassword(password)) {
+    return res.status(400).json({
+      success: false,
+      message:
+        "La contrasena debe tener al menos 8 caracteres, mayuscula, minuscula, numero y simbolo.",
+    });
+  }
+
+  const requireDoctorDocuments =
+    String(process.env.REQUIRE_DOCTOR_DOCUMENTS || "true") === "true";
+  const docsRaw = documentos && typeof documentos === "object" ? documentos : {};
+  const cedulaProfesionalUrl = String(
+    docsRaw.cedulaProfesionalUrl || docsRaw.cedulaUrl || ""
+  ).trim();
+  const certificadoEspecialidadUrl = String(
+    docsRaw.certificadoEspecialidadUrl ||
+      docsRaw.especialidadUrl ||
+      docsRaw.tituloEspecialidadUrl ||
+      ""
+  ).trim();
+
+  if (
+    requireDoctorDocuments &&
+    (!cedulaProfesionalUrl || !certificadoEspecialidadUrl)
+  ) {
+    return res.status(400).json({
+      success: false,
+      message:
+        "Debes subir cedula profesional y documento de especialidad para continuar.",
+    });
+  }
+
+  const allDocumentUrls = [cedulaProfesionalUrl, certificadoEspecialidadUrl].filter(
+    Boolean
+  );
+  const invalidDocument = allDocumentUrls.find((url) => {
+    if (url.length > MAX_PHOTO_URL_LENGTH) return true;
+    return !isSupportedImageUri(url);
+  });
+  if (invalidDocument) {
+    return res.status(400).json({
+      success: false,
+      message:
+        "Los documentos deben ser URLs/URIs de imagen validas (http/https/file/data:image).",
+    });
+  }
+
   let client;
 
   try {
-    const normalizedEmail = String(email).toLowerCase().trim();
+    await ensureRfCoreSchema();
     const fechaSQL = toSqlDate(fechanacimiento);
     const nombreCompletoTrim = String(nombreCompleto).replace(/\s+/g, " ").trim();
     const cedulaClean = String(cedula).replace(/\D/g, "").slice(0, 11);
@@ -965,15 +1109,33 @@ router.post("/register-medico", async (req, res) => {
     }
 
     const passwordhash = await bcrypt.hash(String(password), 10);
-    // Para medicos, el default debe ser rol medico (2) si no se define DEFAULT_MEDICO_ROLID.
-    const rolid = Number(process.env.DEFAULT_MEDICO_ROLID || 2);
+    const rolid = Number(process.env.DEFAULT_MEDICO_ROLID || MEDICO_ROLE_ID);
     const activo = String(process.env.DEFAULT_ACTIVO || "true") === "true";
+    const accountStatus = ACCOUNT_STATUS.PENDING_APPROVAL;
+    const emailVerificado = true;
 
     const insertUsuario = await client.query(
-      `INSERT INTO usuario (rolid, email, passwordhash, fechacreacion, activo)
-       VALUES ($1,$2,$3,NOW(),$4)
+      `INSERT INTO usuario (
+         rolid,
+         email,
+         passwordhash,
+         fechacreacion,
+         activo,
+         account_status,
+         email_verificado,
+         email_verificado_at,
+         aprobado_por_admin
+       )
+       VALUES ($1,$2,$3,NOW(),$4,$5,$6,CASE WHEN $6 THEN NOW() ELSE NULL END,FALSE)
        RETURNING usuarioid`,
-      [rolid, normalizedEmail, passwordhash, activo]
+      [
+        rolid,
+        normalizedEmail,
+        passwordhash,
+        activo,
+        accountStatus,
+        emailVerificado,
+      ]
     );
 
     const usuarioid = insertUsuario.rows[0].usuarioid;
@@ -1002,13 +1164,35 @@ router.post("/register-medico", async (req, res) => {
     if (fotoUrlTrim) profilePatch.fotoUrl = fotoUrlTrim;
     await upsertUserProfileById(client, usuarioid, profilePatch);
 
+    if (cedulaProfesionalUrl) {
+      await saveMedicoDocument(client, {
+        usuarioid,
+        medicoid: String(medicoRow.medicoid || ""),
+        tipo: "cedula_profesional",
+        nombre: "Cedula profesional",
+        archivoUrl: cedulaProfesionalUrl,
+      });
+    }
+    if (certificadoEspecialidadUrl) {
+      await saveMedicoDocument(client, {
+        usuarioid,
+        medicoid: String(medicoRow.medicoid || ""),
+        tipo: "certificado_especialidad",
+        nombre: "Certificado de especialidad",
+        archivoUrl: certificadoEspecialidadUrl,
+      });
+    }
+
     await client.query("COMMIT");
 
     return res.status(201).json({
       success: true,
-      message: "Médico registrado correctamente.",
+      message:
+        "Medico registrado correctamente. Tu cuenta queda pendiente de aprobacion administrativa.",
       medico: medicoRow,
       usuarioid,
+      accountStatus,
+      requiresAdminApproval: true,
     });
   } catch (err) {
     if (client) {
@@ -1021,6 +1205,156 @@ router.post("/register-medico", async (req, res) => {
       success: false,
       message: "Error interno registrando médico.",
       error: err?.message || String(err),
+    });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+/**
+ * ===============================
+ * POST /api/auth/verify-email
+ * Verifica correo de paciente por codigo
+ * ===============================
+ */
+router.post("/verify-email", async (req, res) => {
+  const email = String(req.body?.email || "")
+    .toLowerCase()
+    .trim();
+  const codigo = String(req.body?.codigo || "").trim();
+
+  if (!isValidEmail(email)) {
+    return res.status(400).json({
+      success: false,
+      message: "Correo invalido.",
+    });
+  }
+  if (!/^\d{6}$/.test(codigo)) {
+    return res.status(400).json({
+      success: false,
+      message: "El codigo debe tener 6 digitos.",
+    });
+  }
+
+  let client;
+  try {
+    await ensureRfCoreSchema();
+    client = await pool.connect();
+    await client.query("BEGIN");
+
+    const result = await verifyEmailVerificationCode(client, {
+      email,
+      codigo,
+    });
+    if (!result.ok) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({
+        success: false,
+        code: result.code,
+        message: result.message,
+      });
+    }
+
+    await client.query("COMMIT");
+    return res.json({
+      success: true,
+      message: "Correo verificado correctamente. Ya puedes iniciar sesion.",
+    });
+  } catch (err) {
+    if (client) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (_) {}
+    }
+    return res.status(500).json({
+      success: false,
+      message: "No se pudo verificar el correo.",
+    });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+/**
+ * ===============================
+ * POST /api/auth/resend-verification
+ * Reenvia codigo de verificacion de correo
+ * ===============================
+ */
+router.post("/resend-verification", async (req, res) => {
+  const email = String(req.body?.email || "")
+    .toLowerCase()
+    .trim();
+
+  if (!isValidEmail(email)) {
+    return res.status(400).json({
+      success: false,
+      message: "Correo invalido.",
+    });
+  }
+
+  let client;
+  try {
+    await ensureRfCoreSchema();
+    client = await pool.connect();
+
+    const userResult = await client.query(
+      `SELECT
+         usuarioid,
+         rolid,
+         activo,
+         account_status,
+         email_verificado
+       FROM usuario
+       WHERE email = $1
+       LIMIT 1`,
+      [email]
+    );
+
+    // Respuesta generica para evitar enumeracion.
+    if (!userResult.rows.length) {
+      return res.json({
+        success: true,
+        message:
+          "Si el correo existe y requiere verificacion, te enviaremos un nuevo codigo.",
+      });
+    }
+
+    const userRow = userResult.rows[0];
+    const status = normalizeComparableText(userRow.account_status || "activa");
+    const emailVerified = Boolean(userRow.email_verificado);
+
+    if (
+      !Boolean(userRow.activo) ||
+      emailVerified ||
+      status !== ACCOUNT_STATUS.PENDING_VERIFICATION
+    ) {
+      return res.json({
+        success: true,
+        message:
+          "Si el correo existe y requiere verificacion, te enviaremos un nuevo codigo.",
+      });
+    }
+
+    const codePayload = await createEmailVerificationCode(client, {
+      usuarioid: userRow.usuarioid,
+      email,
+      ttlMinutes: EMAIL_CODE_TTL_MINUTES,
+    });
+    const delivery = await sendEmailVerificationCodeEmail({
+      email,
+      code: codePayload.codigo,
+    });
+
+    return res.json({
+      success: true,
+      message: "Te enviamos un nuevo codigo de verificacion.",
+      ...(delivery?.devCode ? { devVerificationCode: delivery.devCode } : {}),
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: "No se pudo reenviar el codigo de verificacion.",
     });
   } finally {
     if (client) client.release();
@@ -1388,10 +1722,19 @@ router.post("/login", async (req, res) => {
   let client;
 
   try {
+    await ensureRfCoreSchema();
     client = await pool.connect();
 
     const result = await client.query(
-      `SELECT usuarioid, rolid, email, passwordhash, activo, fechacreacion
+      `SELECT
+         usuarioid,
+         rolid,
+         email,
+         passwordhash,
+         activo,
+         fechacreacion,
+         account_status,
+         email_verificado
        FROM usuario
        WHERE email = $1`,
       [normalizedEmail]
@@ -1403,13 +1746,18 @@ router.post("/login", async (req, res) => {
 
     const user = result.rows[0];
 
-    if (!user.activo) {
-      return res.status(403).json({ success: false, message: "Usuario inactivo." });
-    }
-
     const ok = await bcrypt.compare(String(password), user.passwordhash);
     if (!ok) {
       return res.status(401).json({ success: false, message: "Credenciales inválidas." });
+    }
+
+    const loginState = resolveLoginAccessState(user);
+    if (!loginState.ok) {
+      return res.status(403).json({
+        success: false,
+        code: loginState.code,
+        message: loginState.message,
+      });
     }
 
     if (!process.env.JWT_SECRET) {
@@ -1448,10 +1796,18 @@ router.get("/me", requireAuth, async (req, res) => {
   let client;
 
   try {
+    await ensureRfCoreSchema();
     client = await pool.connect();
 
     const result = await client.query(
-      `SELECT usuarioid, rolid, email, activo, fechacreacion
+      `SELECT
+         usuarioid,
+         rolid,
+         email,
+         activo,
+         fechacreacion,
+         account_status,
+         email_verificado
        FROM usuario
        WHERE usuarioid = $1`,
       [req.user.usuarioid]
@@ -1462,8 +1818,15 @@ router.get("/me", requireAuth, async (req, res) => {
     }
 
     const user = result.rows[0];
-    if (!user.activo) {
-      return res.status(403).json({ success: false, message: "Usuario inactivo." });
+    const loginState = resolveLoginAccessState(user, {
+      enforceEmailVerification: false,
+    });
+    if (!loginState.ok) {
+      return res.status(403).json({
+        success: false,
+        code: loginState.code,
+        message: loginState.message,
+      });
     }
 
     const userPayload = await buildAuthUserPayload(client, user);

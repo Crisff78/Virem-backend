@@ -1,0 +1,692 @@
+﻿const express = require("express");
+const pool = require("../config/db");
+const { requireAuth } = require("./middleware/auth");
+const {
+  ACCOUNT_STATUS,
+  ensureRfCoreSchema,
+  normalizeText,
+  normalizeAccountStatus,
+  listMedicoDocumentsByUsuarioId,
+  recordUserModification,
+} = require("../services/rf-core");
+
+const router = express.Router();
+
+async function requireAdminContext(client, reqUser) {
+  const result = await client.query(
+    `SELECT usuarioid, rolid, email, activo, account_status
+     FROM usuario
+     WHERE usuarioid = $1
+     LIMIT 1`,
+    [Number(reqUser?.usuarioid || 0)]
+  );
+
+  if (!result.rows.length) {
+    return { ok: false, status: 404, message: "Usuario autenticado no encontrado." };
+  }
+
+  const user = result.rows[0];
+  if (!Boolean(user.activo)) {
+    return { ok: false, status: 403, message: "Usuario inactivo." };
+  }
+
+  if (Number(user.rolid) !== 3) {
+    return {
+      ok: false,
+      status: 403,
+      message: "Este endpoint requiere rol administrador.",
+    };
+  }
+
+  const status = normalizeAccountStatus(user.account_status, ACCOUNT_STATUS.ACTIVE);
+  if (status !== ACCOUNT_STATUS.ACTIVE) {
+    return {
+      ok: false,
+      status: 403,
+      message: "Tu cuenta administradora no esta activa.",
+    };
+  }
+
+  return { ok: true, user };
+}
+
+router.use(requireAuth);
+router.use(async (_req, res, next) => {
+  try {
+    await ensureRfCoreSchema();
+    return next();
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: "No se pudo preparar el esquema administrativo.",
+    });
+  }
+});
+
+// ===============================
+// GET /api/admin/panel
+// Estadisticas basicas para panel administrativo
+// ===============================
+router.get("/panel", async (req, res) => {
+  let client;
+  try {
+    client = await pool.connect();
+
+    const admin = await requireAdminContext(client, req.user);
+    if (!admin.ok) {
+      return res.status(admin.status).json({ success: false, message: admin.message });
+    }
+
+    const [users, citas, pagos, reviews] = await Promise.all([
+      client.query(
+        `SELECT
+           COUNT(*)::int AS total_usuarios,
+           COUNT(*) FILTER (WHERE activo = TRUE)::int AS activos,
+           COUNT(*) FILTER (WHERE rolid = 1)::int AS pacientes,
+           COUNT(*) FILTER (WHERE rolid = 2)::int AS medicos,
+           COUNT(*) FILTER (WHERE rolid = 2 AND account_status = $1)::int AS medicos_pendientes,
+           COUNT(*) FILTER (WHERE account_status = $2)::int AS bloqueados
+         FROM usuario`,
+        [ACCOUNT_STATUS.PENDING_APPROVAL, ACCOUNT_STATUS.BLOCKED]
+      ),
+      client.query(
+        `SELECT
+           COUNT(*) FILTER (WHERE fechahorainicio::date = CURRENT_DATE)::int AS citas_hoy,
+           COUNT(*) FILTER (
+             WHERE date_trunc('month', fechahorainicio) = date_trunc('month', NOW())
+           )::int AS citas_mes
+         FROM cita`
+      ),
+      client.query(
+        `SELECT
+           COUNT(*)::int AS pagos_total,
+           COUNT(*) FILTER (WHERE lower(estado) = 'simulado_aprobado')::int AS pagos_simulados,
+           COALESCE(SUM(monto), 0)::numeric(14,2) AS monto_total
+         FROM pago`
+      ),
+      client.query(
+        `SELECT
+           COUNT(*)::int AS valoraciones_total,
+           COUNT(*) FILTER (WHERE lower(estado_moderacion) = 'pendiente')::int AS valoraciones_pendientes
+         FROM valoracion`
+      ),
+    ]);
+
+    return res.json({
+      success: true,
+      panel: {
+        usuarios: users.rows[0] || {},
+        citas: citas.rows[0] || {},
+        pagos: pagos.rows[0] || {},
+        valoraciones: reviews.rows[0] || {},
+      },
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: "No se pudo cargar el panel administrativo.",
+    });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+// ===============================
+// GET /api/admin/medicos/pendientes
+// Lista medicos pendientes de aprobacion
+// ===============================
+router.get("/medicos/pendientes", async (req, res) => {
+  const limitRaw = Number.parseInt(String(req.query?.limit || "30"), 10);
+  const limit = Number.isFinite(limitRaw) ? Math.min(100, Math.max(1, limitRaw)) : 30;
+
+  let client;
+  try {
+    client = await pool.connect();
+
+    const admin = await requireAdminContext(client, req.user);
+    if (!admin.ok) {
+      return res.status(admin.status).json({ success: false, message: admin.message });
+    }
+
+    const pending = await client.query(
+      `SELECT
+         u.usuarioid,
+         u.email,
+         u.fechacreacion,
+         u.account_status,
+         m.medicoid::text AS medicoid,
+         m.nombrecompleto,
+         m.cedula,
+         m.telefono,
+         COALESCE(e.nombre, 'Medicina General') AS especialidad,
+         up.foto_url
+       FROM usuario u
+       LEFT JOIN usuario_perfil up ON up.usuarioid::text = u.usuarioid::text
+       LEFT JOIN medico m
+         ON (
+           m.medicoid::text = COALESCE(up.meta_json->>'medicoid', up.meta_json->>'medicoId', '')
+           OR m.medicoid::text = u.usuarioid::text
+         )
+       LEFT JOIN especialidad e ON e.especialidadid = m.especialidadid
+       WHERE u.rolid = 2
+         AND u.account_status = $1
+       ORDER BY u.fechacreacion DESC
+       LIMIT $2`,
+      [ACCOUNT_STATUS.PENDING_APPROVAL, limit]
+    );
+
+    const items = [];
+    for (const row of pending.rows) {
+      const usuarioid = Number(row.usuarioid || 0);
+      const docs = await listMedicoDocumentsByUsuarioId(client, usuarioid);
+      items.push({
+        usuarioid,
+        email: normalizeText(row.email),
+        estadoCuenta: normalizeAccountStatus(row.account_status),
+        fechaRegistro: row.fechacreacion || null,
+        medico: {
+          medicoid: normalizeText(row.medicoid),
+          nombreCompleto: normalizeText(row.nombrecompleto),
+          cedula: normalizeText(row.cedula),
+          telefono: normalizeText(row.telefono),
+          especialidad: normalizeText(row.especialidad) || "Medicina General",
+          fotoUrl: normalizeText(row.foto_url) || null,
+        },
+        documentos: docs,
+      });
+    }
+
+    return res.json({ success: true, pendientes: items });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: "No se pudo listar medicos pendientes.",
+    });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+// ===============================
+// PATCH /api/admin/medicos/:usuarioId/aprobar
+// ===============================
+router.patch("/medicos/:usuarioId/aprobar", async (req, res) => {
+  const usuarioId = Number.parseInt(String(req.params?.usuarioId || ""), 10);
+  const comentario = normalizeText(req.body?.comentario || req.body?.motivo || "");
+
+  if (!Number.isFinite(usuarioId) || usuarioId <= 0) {
+    return res.status(400).json({ success: false, message: "usuarioId invalido." });
+  }
+
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query("BEGIN");
+
+    const admin = await requireAdminContext(client, req.user);
+    if (!admin.ok) {
+      await client.query("ROLLBACK");
+      return res.status(admin.status).json({ success: false, message: admin.message });
+    }
+
+    const target = await client.query(
+      `SELECT usuarioid, rolid, email, account_status
+       FROM usuario
+       WHERE usuarioid = $1
+       LIMIT 1
+       FOR UPDATE`,
+      [usuarioId]
+    );
+
+    if (!target.rows.length || Number(target.rows[0].rolid) !== 2) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ success: false, message: "Medico no encontrado." });
+    }
+
+    await client.query(
+      `UPDATE usuario
+       SET account_status = $1,
+           activo = TRUE,
+           aprobado_por_admin = TRUE
+       WHERE usuarioid = $2`,
+      [ACCOUNT_STATUS.ACTIVE, usuarioId]
+    );
+
+    await client.query(
+      `UPDATE medico_documento
+       SET estado_revision = 'aprobado',
+           comentario_admin = COALESCE($1, comentario_admin),
+           actualizado_en = NOW()
+       WHERE usuarioid = $2`,
+      [comentario || null, usuarioId]
+    );
+
+    await recordUserModification(client, {
+      usuarioid: usuarioId,
+      actorUsuarioid: Number(req.user.usuarioid),
+      scope: "aprobacion_medico",
+      motivo: comentario,
+      changes: {
+        account_status: {
+          before: normalizeAccountStatus(target.rows[0].account_status),
+          after: ACCOUNT_STATUS.ACTIVE,
+        },
+      },
+    });
+
+    await client.query("COMMIT");
+    return res.json({
+      success: true,
+      message: "Medico aprobado correctamente.",
+      usuarioid: usuarioId,
+      accountStatus: ACCOUNT_STATUS.ACTIVE,
+    });
+  } catch (err) {
+    if (client) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (_) {}
+    }
+    return res.status(500).json({ success: false, message: "No se pudo aprobar el medico." });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+// ===============================
+// PATCH /api/admin/medicos/:usuarioId/rechazar
+// ===============================
+router.patch("/medicos/:usuarioId/rechazar", async (req, res) => {
+  const usuarioId = Number.parseInt(String(req.params?.usuarioId || ""), 10);
+  const comentario = normalizeText(req.body?.comentario || req.body?.motivo || "");
+
+  if (!Number.isFinite(usuarioId) || usuarioId <= 0) {
+    return res.status(400).json({ success: false, message: "usuarioId invalido." });
+  }
+
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query("BEGIN");
+
+    const admin = await requireAdminContext(client, req.user);
+    if (!admin.ok) {
+      await client.query("ROLLBACK");
+      return res.status(admin.status).json({ success: false, message: admin.message });
+    }
+
+    const target = await client.query(
+      `SELECT usuarioid, rolid, email, account_status
+       FROM usuario
+       WHERE usuarioid = $1
+       LIMIT 1
+       FOR UPDATE`,
+      [usuarioId]
+    );
+
+    if (!target.rows.length || Number(target.rows[0].rolid) !== 2) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ success: false, message: "Medico no encontrado." });
+    }
+
+    await client.query(
+      `UPDATE usuario
+       SET account_status = $1,
+           activo = FALSE,
+           aprobado_por_admin = FALSE
+       WHERE usuarioid = $2`,
+      [ACCOUNT_STATUS.REJECTED, usuarioId]
+    );
+
+    await client.query(
+      `UPDATE medico_documento
+       SET estado_revision = 'rechazado',
+           comentario_admin = COALESCE($1, comentario_admin),
+           actualizado_en = NOW()
+       WHERE usuarioid = $2`,
+      [comentario || null, usuarioId]
+    );
+
+    await recordUserModification(client, {
+      usuarioid: usuarioId,
+      actorUsuarioid: Number(req.user.usuarioid),
+      scope: "rechazo_medico",
+      motivo: comentario,
+      changes: {
+        account_status: {
+          before: normalizeAccountStatus(target.rows[0].account_status),
+          after: ACCOUNT_STATUS.REJECTED,
+        },
+      },
+    });
+
+    await client.query("COMMIT");
+    return res.json({
+      success: true,
+      message: "Solicitud de medico rechazada.",
+      usuarioid: usuarioId,
+      accountStatus: ACCOUNT_STATUS.REJECTED,
+    });
+  } catch (err) {
+    if (client) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (_) {}
+    }
+    return res.status(500).json({ success: false, message: "No se pudo rechazar el medico." });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+// ===============================
+// GET /api/admin/usuarios/modificaciones
+// ===============================
+router.get("/usuarios/modificaciones", async (req, res) => {
+  const usuarioId = Number.parseInt(String(req.query?.usuarioId || ""), 10);
+  const limitRaw = Number.parseInt(String(req.query?.limit || "80"), 10);
+  const limit = Number.isFinite(limitRaw) ? Math.min(300, Math.max(1, limitRaw)) : 80;
+
+  let client;
+  try {
+    client = await pool.connect();
+
+    const admin = await requireAdminContext(client, req.user);
+    if (!admin.ok) {
+      return res.status(admin.status).json({ success: false, message: admin.message });
+    }
+
+    const params = [];
+    const where = [];
+    if (Number.isFinite(usuarioId) && usuarioId > 0) {
+      params.push(usuarioId);
+      where.push(`h.usuarioid = $${params.length}`);
+    }
+    params.push(limit);
+
+    const sql = `SELECT
+      h.id,
+      h.usuarioid,
+      h.actor_usuarioid,
+      h.scope,
+      h.cambios_json,
+      h.motivo,
+      h.created_at,
+      u.email AS usuario_email,
+      actor.email AS actor_email
+    FROM user_modificacion_historial h
+    LEFT JOIN usuario u ON u.usuarioid = h.usuarioid
+    LEFT JOIN usuario actor ON actor.usuarioid = h.actor_usuarioid
+    ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
+    ORDER BY h.created_at DESC
+    LIMIT $${params.length}`;
+
+    const result = await client.query(sql, params);
+
+    return res.json({
+      success: true,
+      modificaciones: result.rows.map((row) => ({
+        id: Number(row.id || 0),
+        usuarioid: Number(row.usuarioid || 0),
+        usuarioEmail: normalizeText(row.usuario_email),
+        actorUsuarioid: row.actor_usuarioid ? Number(row.actor_usuarioid) : null,
+        actorEmail: normalizeText(row.actor_email),
+        scope: normalizeText(row.scope),
+        cambios: row.cambios_json || {},
+        motivo: normalizeText(row.motivo),
+        createdAt: row.created_at || null,
+      })),
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: "No se pudo listar historial de modificaciones.",
+    });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+// ===============================
+// PATCH /api/admin/usuarios/:usuarioId/estado
+// Bloqueo/activacion de cuentas
+// ===============================
+router.patch("/usuarios/:usuarioId/estado", async (req, res) => {
+  const usuarioId = Number.parseInt(String(req.params?.usuarioId || ""), 10);
+  const activo = req.body?.activo;
+  const nextStatusRaw = normalizeText(req.body?.accountStatus || req.body?.estadoCuenta || "");
+  const motivo = normalizeText(req.body?.motivo || "");
+
+  if (!Number.isFinite(usuarioId) || usuarioId <= 0) {
+    return res.status(400).json({ success: false, message: "usuarioId invalido." });
+  }
+
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query("BEGIN");
+
+    const admin = await requireAdminContext(client, req.user);
+    if (!admin.ok) {
+      await client.query("ROLLBACK");
+      return res.status(admin.status).json({ success: false, message: admin.message });
+    }
+
+    const target = await client.query(
+      `SELECT usuarioid, email, activo, account_status
+       FROM usuario
+       WHERE usuarioid = $1
+       LIMIT 1
+       FOR UPDATE`,
+      [usuarioId]
+    );
+
+    if (!target.rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ success: false, message: "Usuario no encontrado." });
+    }
+
+    const before = target.rows[0];
+    const nextActive = activo === undefined ? Boolean(before.activo) : Boolean(activo);
+    const nextStatus = nextStatusRaw
+      ? normalizeAccountStatus(nextStatusRaw, normalizeAccountStatus(before.account_status))
+      : normalizeAccountStatus(before.account_status);
+
+    await client.query(
+      `UPDATE usuario
+       SET activo = $1,
+           account_status = $2
+       WHERE usuarioid = $3`,
+      [nextActive, nextStatus, usuarioId]
+    );
+
+    await recordUserModification(client, {
+      usuarioid: usuarioId,
+      actorUsuarioid: Number(req.user.usuarioid),
+      scope: "estado_cuenta",
+      motivo,
+      changes: {
+        activo: {
+          before: Boolean(before.activo),
+          after: nextActive,
+        },
+        account_status: {
+          before: normalizeAccountStatus(before.account_status),
+          after: nextStatus,
+        },
+      },
+    });
+
+    await client.query("COMMIT");
+    return res.json({
+      success: true,
+      message: "Estado de cuenta actualizado.",
+      usuarioid: usuarioId,
+      activo: nextActive,
+      accountStatus: nextStatus,
+    });
+  } catch (err) {
+    if (client) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (_) {}
+    }
+    return res.status(500).json({ success: false, message: "No se pudo actualizar el estado." });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+// ===============================
+// GET /api/admin/valoraciones/pendientes
+// ===============================
+router.get("/valoraciones/pendientes", async (req, res) => {
+  const limitRaw = Number.parseInt(String(req.query?.limit || "80"), 10);
+  const limit = Number.isFinite(limitRaw) ? Math.min(200, Math.max(1, limitRaw)) : 80;
+
+  let client;
+  try {
+    client = await pool.connect();
+
+    const admin = await requireAdminContext(client, req.user);
+    if (!admin.ok) {
+      return res.status(admin.status).json({ success: false, message: admin.message });
+    }
+
+    const result = await client.query(
+      `SELECT
+         v.valoracionid,
+         v.citaid::text AS citaid,
+         v.pacienteid,
+         v.medicoid_text,
+         v.puntaje,
+         v.comentario,
+         v.estado_moderacion,
+         v.created_at,
+         COALESCE(m.nombrecompleto, 'Medico') AS medico_nombre,
+         COALESCE(
+           NULLIF(TRIM(COALESCE(p.nombres, '') || ' ' || COALESCE(p.apellidos, '')), ''),
+           'Paciente'
+         ) AS paciente_nombre
+       FROM valoracion v
+       LEFT JOIN medico m ON m.medicoid::text = v.medicoid_text
+       LEFT JOIN paciente p ON p.pacienteid = v.pacienteid
+       WHERE lower(COALESCE(v.estado_moderacion, 'pendiente')) = 'pendiente'
+       ORDER BY v.created_at DESC
+       LIMIT $1`,
+      [limit]
+    );
+
+    return res.json({
+      success: true,
+      valoraciones: result.rows.map((row) => ({
+        valoracionId: Number(row.valoracionid || 0),
+        citaId: normalizeText(row.citaid),
+        pacienteId: Number(row.pacienteid || 0),
+        pacienteNombre: normalizeText(row.paciente_nombre),
+        medicoId: normalizeText(row.medicoid_text),
+        medicoNombre: normalizeText(row.medico_nombre),
+        puntaje: Number(row.puntaje || 0),
+        comentario: normalizeText(row.comentario),
+        estadoModeracion: normalizeText(row.estado_moderacion) || 'pendiente',
+        createdAt: row.created_at || null,
+      })),
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: "No se pudieron listar valoraciones." });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+// ===============================
+// PATCH /api/admin/valoraciones/:valoracionId/moderar
+// Body: { accion: aprobar|rechazar, comentario?: string }
+// ===============================
+router.patch("/valoraciones/:valoracionId/moderar", async (req, res) => {
+  const valoracionId = Number.parseInt(String(req.params?.valoracionId || ""), 10);
+  const accionRaw = normalizeText(req.body?.accion || "").toLowerCase();
+  const comentario = normalizeText(req.body?.comentario || req.body?.motivo || "");
+
+  if (!Number.isFinite(valoracionId) || valoracionId <= 0) {
+    return res.status(400).json({ success: false, message: "valoracionId invalido." });
+  }
+
+  const estadoDestino = accionRaw === "aprobar" ? "aprobada" : accionRaw === "rechazar" ? "rechazada" : "";
+  if (!estadoDestino) {
+    return res.status(400).json({
+      success: false,
+      message: "accion invalida. Usa aprobar o rechazar.",
+    });
+  }
+
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query("BEGIN");
+
+    const admin = await requireAdminContext(client, req.user);
+    if (!admin.ok) {
+      await client.query("ROLLBACK");
+      return res.status(admin.status).json({ success: false, message: admin.message });
+    }
+
+    const current = await client.query(
+      `SELECT valoracionid, pacienteid
+       FROM valoracion
+       WHERE valoracionid = $1
+       LIMIT 1
+       FOR UPDATE`,
+      [valoracionId]
+    );
+
+    if (!current.rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ success: false, message: "Valoracion no encontrada." });
+    }
+
+    await client.query(
+      `UPDATE valoracion
+       SET estado_moderacion = $1,
+           moderada_por = $2,
+           moderada_en = NOW(),
+           comentario = CASE
+             WHEN $3 <> '' THEN COALESCE(comentario, '') || E'\n\n[Moderacion admin]: ' || $3
+             ELSE comentario
+           END,
+           updated_at = NOW()
+       WHERE valoracionid = $4`,
+      [estadoDestino, Number(req.user.usuarioid), comentario, valoracionId]
+    );
+
+    await recordUserModification(client, {
+      usuarioid: Number(current.rows[0].pacienteid || 0),
+      actorUsuarioid: Number(req.user.usuarioid),
+      scope: "moderacion_valoracion",
+      motivo: comentario,
+      changes: {
+        valoracionId,
+        estadoModeracion: estadoDestino,
+      },
+    });
+
+    await client.query("COMMIT");
+    return res.json({
+      success: true,
+      message: `Valoracion ${estadoDestino}.`,
+      valoracionId,
+      estadoModeracion: estadoDestino,
+    });
+  } catch (err) {
+    if (client) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (_) {}
+    }
+    return res.status(500).json({ success: false, message: "No se pudo moderar la valoracion." });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+module.exports = router;

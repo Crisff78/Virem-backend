@@ -32,6 +32,9 @@ app.get("/", (req, res) => {
       users: "/api/users",
       medicos: "/api/medicos",
       pacientes: "/api/pacientes",
+      clinical: "/api/clinical",
+      payments: "/api/payments",
+      admin: "/api/admin",
       validarTelefono: "/api/validar-telefono",
       recuperarContrasena: "/api/auth/recovery/send-code",
     },
@@ -87,6 +90,24 @@ app.use("/api", exequaturRoutes);
 // ===============================
 const agendaRoutes = require("./routes/agenda.routes.js");
 app.use("/api/agenda", agendaRoutes);
+
+// ===============================
+// ✅ RUTAS CLINICAS (historia/valoraciones)
+// ===============================
+const clinicalRoutes = require("./routes/clinical.routes.js");
+app.use("/api/clinical", clinicalRoutes);
+
+// ===============================
+// ✅ RUTAS PAGOS (simulados)
+// ===============================
+const paymentsRoutes = require("./routes/payments.routes.js");
+app.use("/api/payments", paymentsRoutes);
+
+// ===============================
+// ✅ RUTAS ADMIN
+// ===============================
+const adminRoutes = require("./routes/admin.routes.js");
+app.use("/api/admin", adminRoutes);
 
 
 // Catch-all
