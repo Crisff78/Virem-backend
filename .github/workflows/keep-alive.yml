@@ -1,0 +1,30 @@
+name: Backend Keep Alive
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  keep-alive:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Ping health endpoint
+        env:
+          HEALTHCHECK_URL: ${{ secrets.BACKEND_HEALTHCHECK_URL }}
+        run: |
+          if [ -z "$HEALTHCHECK_URL" ]; then
+            echo "Error: falta el secret BACKEND_HEALTHCHECK_URL con la URL completa del endpoint /health." >&2
+            exit 1
+          fi
+
+          echo "Iniciando keep-alive del backend..."
+          echo "Haciendo ping a: $HEALTHCHECK_URL"
+
+          if http_code=$(curl --request GET --fail --silent --show-error --output /dev/null --write-out "%{http_code}" --max-time 30 "$HEALTHCHECK_URL"); then
+            echo "Ping ejecutado correctamente. HTTP $http_code"
+          else
+            echo "Error: el endpoint no respondio correctamente." >&2
+            exit 1
+          fi
