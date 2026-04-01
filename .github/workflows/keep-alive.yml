@@ -11,13 +11,8 @@ jobs:
 
     steps:
       - name: Ping health endpoint
-        env:
-          HEALTHCHECK_URL: ${{ secrets.BACKEND_HEALTHCHECK_URL }}
         run: |
-          if [ -z "$HEALTHCHECK_URL" ]; then
-            echo "Error: falta el secret BACKEND_HEALTHCHECK_URL con la URL completa del endpoint /health." >&2
-            exit 1
-          fi
+          HEALTHCHECK_URL="https://virem-backend.onrender.com/health"
 
           echo "Iniciando keep-alive del backend..."
           echo "Haciendo ping a: $HEALTHCHECK_URL"
