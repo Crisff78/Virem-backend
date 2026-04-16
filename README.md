@@ -18,12 +18,13 @@ Backend en Node.js + Express + PostgreSQL para autenticacion, agenda medica, cha
      - `SMTP_PASS=...`
      - `SMTP_FROM=...`
      - `PUBLIC_BACKEND_URL=http://localhost:3000` (o URL publica real)
-     - `PUBLIC_WEB_URL=http://localhost:8081` (opcional, para boton de login en pagina de verificacion)
-      - `EMAIL_FALLBACK_TO_CONSOLE=false`
+     - `PUBLIC_WEB_URL=http://localhost:8082` (opcional, para boton de login en pagina de verificacion)
+     - `EMAIL_FALLBACK_TO_CONSOLE=false`
    - Variables recomendadas para endurecimiento en produccion:
       - `NODE_ENV=production`
       - `JWT_SECRET=<minimo_32_caracteres>`
-      - `CORS_ORIGIN=https://tu-frontend.com,https://admin.tu-frontend.com`
+      - `CORS_ORIGIN=https://tu-frontend.com,https://admin.tu-frontend.com,http://localhost:8082`
+      - `CORS_ALLOW_LOOPBACK=true` (opcional; usa `false` si quieres bloquear `localhost`/`127.0.0.1`)
       - `GLOBAL_RATE_LIMIT_WINDOW_MS=60000`
       - `GLOBAL_RATE_LIMIT_MAX=180`
       - `MAX_JSON_BODY=1mb`
@@ -130,7 +131,7 @@ Eventos emitidos:
 
 ## Checklist de rollout seguro (produccion)
 1. Definir `JWT_SECRET` robusto (>= 32 caracteres).
-2. Configurar `CORS_ORIGIN` con dominios reales (sin wildcard).
+2. Configurar `CORS_ORIGIN` con dominios reales (sin wildcard) y agregar `http://localhost:8082` si haras QA desde web local contra el backend desplegado.
 3. Ajustar `GLOBAL_RATE_LIMIT_MAX` segun capacidad de infraestructura.
 4. Mantener `MAX_JSON_BODY` bajo (recomendado `1mb`, subir solo si es estrictamente necesario).
 5. Verificar que `/health` responda correctamente despues del deploy.

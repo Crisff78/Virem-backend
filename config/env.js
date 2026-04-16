@@ -1,10 +1,12 @@
 const DEFAULT_ALLOWED_ORIGINS = [
-    "http://localhost:8081",
-    "http://localhost:19006",
     "http://localhost:3000",
-    "http://127.0.0.1:8081",
-    "http://127.0.0.1:19006",
+    "http://localhost:8081",
+    "http://localhost:8082",
+    "http://localhost:19006",
     "http://127.0.0.1:3000",
+    "http://127.0.0.1:8081",
+    "http://127.0.0.1:8082",
+    "http://127.0.0.1:19006",
 ];
 
 function normalizeList(value) {
@@ -25,18 +27,43 @@ function toOrigin(value) {
     }
 }
 
+function uniqueList(values) {
+    return Array.from(new Set(values.filter(Boolean)));
+}
+
+function normalizeOrigins(values) {
+    return uniqueList(
+        values
+            .map((value) => toOrigin(value))
+            .filter(Boolean)
+    );
+}
+
+function getConfiguredCorsOrigins() {
+    return normalizeOrigins([
+        ...normalizeList(process.env.CORS_ORIGIN),
+        process.env.PUBLIC_WEB_URL,
+    ]);
+}
+
+function allowLoopbackCorsOrigins() {
+    return toBoolean(process.env.CORS_ALLOW_LOOPBACK, true);
+}
+
 function getAllowedCorsOrigins() {
-    const envList = normalizeList(process.env.CORS_ORIGIN);
-    if (envList.length > 0) return envList;
+    const configuredOrigins = getConfiguredCorsOrigins();
+    const loopbackOrigins = allowLoopbackCorsOrigins() ? DEFAULT_ALLOWED_ORIGINS : [];
+    const isProduction = String(process.env.NODE_ENV || "").toLowerCase() === "production";
 
-    const publicWebOrigin = toOrigin(process.env.PUBLIC_WEB_URL);
-    if (publicWebOrigin) return [publicWebOrigin];
-
-    if (String(process.env.NODE_ENV || "").toLowerCase() === "production") {
-        return [];
+    if (configuredOrigins.length > 0) {
+        return uniqueList([...configuredOrigins, ...loopbackOrigins]);
     }
 
-    return DEFAULT_ALLOWED_ORIGINS;
+    if (isProduction) {
+        return uniqueList(loopbackOrigins);
+    }
+
+    return uniqueList([...DEFAULT_ALLOWED_ORIGINS, ...loopbackOrigins]);
 }
 
 function getJsonBodyLimit() {
@@ -68,6 +95,8 @@ function validateCriticalEnv() {
     const errors = [];
     const warnings = [];
     const isProduction = String(process.env.NODE_ENV || "").toLowerCase() === "production";
+    const configuredCorsOrigins = getConfiguredCorsOrigins();
+    const loopbackCorsEnabled = allowLoopbackCorsOrigins();
 
     if (!process.env.JWT_SECRET) {
         errors.push("JWT_SECRET is required.");
@@ -88,9 +117,13 @@ function validateCriticalEnv() {
             errors.push("JWT_SECRET must have at least 32 characters in production.");
         }
 
-        if (!String(process.env.CORS_ORIGIN || "").trim() && !toOrigin(process.env.PUBLIC_WEB_URL)) {
+        if (!configuredCorsOrigins.length && !loopbackCorsEnabled) {
             warnings.push(
                 "CORS_ORIGIN is empty in production and PUBLIC_WEB_URL is missing/invalid; browser clients may be blocked."
+            );
+        } else if (!configuredCorsOrigins.length && loopbackCorsEnabled) {
+            warnings.push(
+                "CORS_ORIGIN and PUBLIC_WEB_URL are empty/invalid in production; only loopback origins remain enabled."
             );
         }
     }

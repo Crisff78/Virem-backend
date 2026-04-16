@@ -10,6 +10,14 @@ const { requestContext, requestLogger } = require("./middleware/request-context"
 const { securityHeaders } = require("./middleware/security");
 const { notFoundHandler, errorHandler } = require("./middleware/error-handler");
 
+function buildCorsOriginError(origin) {
+    const err = new Error("Origin no permitido por CORS.");
+    err.statusCode = 403;
+    err.code = "origin_not_allowed";
+    err.origin = origin || null;
+    return err;
+}
+
 function createApp() {
     const app = express();
 
@@ -18,14 +26,15 @@ function createApp() {
         origin(origin, callback) {
             if (!origin) return callback(null, true);
             if (!allowedOrigins.length) {
-                return callback(new Error("origin_not_allowed"));
+                return callback(buildCorsOriginError(origin));
             }
             if (allowedOrigins.includes(origin)) {
                 return callback(null, true);
             }
-            return callback(new Error("origin_not_allowed"));
+            return callback(buildCorsOriginError(origin));
         },
         credentials: true,
+        optionsSuccessStatus: 204,
     };
 
     const globalRateLimitConfig = getGlobalRateLimitConfig();
