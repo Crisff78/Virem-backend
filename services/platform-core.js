@@ -1,6 +1,7 @@
 const { randomUUID } = require("crypto");
 const pool = require("../config/db");
 const { emitToUser } = require("../realtime/socket");
+const { getUserProfileById } = require("./user-profile.store");
 
 const MEDICO_ROLE_ID = 2;
 const PACIENTE_ROLE_ID = 1;
@@ -443,6 +444,33 @@ async function getPacienteByUsuarioId(client, usuarioid) {
   return result.rows[0] || null;
 }
 
+async function getFallbackMedicoByUserProfile(client, usuarioid) {
+  const userProfile = await getUserProfileById(client, usuarioid);
+  const meta =
+    userProfile?.meta && typeof userProfile.meta === "object" && !Array.isArray(userProfile.meta)
+      ? userProfile.meta
+      : {};
+
+  const medicoId = String(meta.medicoid || meta.medicoId || "").trim();
+  if (!medicoId) return null;
+
+  const especialidadId = Number.parseInt(
+    String(meta.especialidadid || meta.especialidadId || ""),
+    10
+  );
+  const nombreCompleto = String(meta.nombreCompleto || meta.nombre || "").trim();
+  const especialidad = String(meta.especialidad || "").trim();
+
+  return {
+    medicoid: medicoId,
+    nombrecompleto: nombreCompleto || null,
+    especialidad: especialidad || "Medicina General",
+    especialidadid:
+      Number.isFinite(especialidadId) && especialidadId > 0 ? especialidadId : null,
+    recoveredFromProfileMeta: true,
+  };
+}
+
 async function getMedicoByUsuarioId(client, usuarioid) {
   const result = await client.query(
     `SELECT
@@ -453,10 +481,13 @@ async function getMedicoByUsuarioId(client, usuarioid) {
      FROM medico m
      LEFT JOIN especialidad e ON e.especialidadid = m.especialidadid
      WHERE m.usuarioid = $1
-     LIMIT 1`,
+      LIMIT 1`,
     [Number(usuarioid)]
   );
-  return result.rows[0] || null;
+  if (result.rows.length) {
+    return result.rows[0];
+  }
+  return getFallbackMedicoByUserProfile(client, usuarioid);
 }
 
 async function resolveUserContext(client, reqUser) {
