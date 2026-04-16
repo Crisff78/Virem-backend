@@ -103,6 +103,15 @@ async function ensureRfCoreSchema() {
 
   ensureRfCoreSchemaPromise = (async () => {
     await pool.query(
+      `ALTER TABLE paciente
+       ADD COLUMN IF NOT EXISTS usuarioid INTEGER`
+    );
+    await pool.query(
+      `ALTER TABLE medico
+       ADD COLUMN IF NOT EXISTS usuarioid INTEGER`
+    );
+
+    await pool.query(
       `ALTER TABLE usuario
        ADD COLUMN IF NOT EXISTS account_status VARCHAR(40) NOT NULL DEFAULT 'activa'`
     );

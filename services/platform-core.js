@@ -1,6 +1,5 @@
 const { randomUUID } = require("crypto");
 const pool = require("../config/db");
-const { getUserProfileById } = require("./user-profile.store");
 const { emitToUser } = require("../realtime/socket");
 
 const MEDICO_ROLE_ID = 2;
@@ -125,6 +124,15 @@ async function ensurePlatformSchema() {
   if (ensurePlatformSchemaPromise) return ensurePlatformSchemaPromise;
 
   ensurePlatformSchemaPromise = (async () => {
+    await pool.query(
+      `ALTER TABLE paciente
+       ADD COLUMN IF NOT EXISTS usuarioid INTEGER`
+    );
+    await pool.query(
+      `ALTER TABLE medico
+       ADD COLUMN IF NOT EXISTS usuarioid INTEGER`
+    );
+
     await pool.query(
       `ALTER TABLE especialidad
        ADD COLUMN IF NOT EXISTS permite_presencial BOOLEAN NOT NULL DEFAULT TRUE`
@@ -421,60 +429,22 @@ async function getUserById(client, usuarioid) {
   return result.rows[0] || null;
 }
 
-async function getPacienteByUsuarioId(client, usuarioid, userCreatedAt) {
-  const direct = await client.query(
+async function getPacienteByUsuarioId(client, usuarioid) {
+  const result = await client.query(
     `SELECT
        p.pacienteid::text AS pacienteid,
        p.nombres,
        p.apellidos
      FROM paciente p
-     WHERE p.pacienteid = $1
+     WHERE p.usuarioid = $1
      LIMIT 1`,
     [Number(usuarioid)]
   );
-  if (direct.rows.length) return direct.rows[0];
-
-  if (!userCreatedAt) return null;
-
-  const byNearest = await client.query(
-    `SELECT
-       p.pacienteid::text AS pacienteid,
-       p.nombres,
-       p.apellidos,
-       ABS(EXTRACT(EPOCH FROM ((p.fecharegistro::timestamp) - ($1::timestamp)))) AS diff_seconds
-     FROM paciente p
-     ORDER BY diff_seconds ASC
-     LIMIT 1`,
-    [userCreatedAt]
-  );
-  if (!byNearest.rows.length) return null;
-  const diffSeconds = Number(byNearest.rows[0].diff_seconds || 0);
-  if (!Number.isFinite(diffSeconds) || diffSeconds > 86400) return null;
-  return byNearest.rows[0];
+  return result.rows[0] || null;
 }
 
-async function getMedicoByUsuarioId(client, usuarioid, userCreatedAt) {
-  const profile = await getUserProfileById(client, usuarioid);
-  const meta = profile?.meta && typeof profile.meta === "object" ? profile.meta : {};
-  const knownMedicoId = normalizeText(meta.medicoid || meta.medicoId);
-
-  if (knownMedicoId) {
-    const byKnown = await client.query(
-      `SELECT
-         m.medicoid::text AS medicoid,
-         m.nombrecompleto,
-         COALESCE(e.nombre, 'Medicina General') AS especialidad,
-         m.especialidadid
-       FROM medico m
-       LEFT JOIN especialidad e ON e.especialidadid = m.especialidadid
-       WHERE m.medicoid::text = $1::text
-       LIMIT 1`,
-      [knownMedicoId]
-    );
-    if (byKnown.rows.length) return byKnown.rows[0];
-  }
-
-  const byDirect = await client.query(
+async function getMedicoByUsuarioId(client, usuarioid) {
+  const result = await client.query(
     `SELECT
        m.medicoid::text AS medicoid,
        m.nombrecompleto,
@@ -482,30 +452,11 @@ async function getMedicoByUsuarioId(client, usuarioid, userCreatedAt) {
        m.especialidadid
      FROM medico m
      LEFT JOIN especialidad e ON e.especialidadid = m.especialidadid
-     WHERE m.medicoid::text = $1::text
+     WHERE m.usuarioid = $1
      LIMIT 1`,
-    [String(usuarioid)]
+    [Number(usuarioid)]
   );
-  if (byDirect.rows.length) return byDirect.rows[0];
-
-  if (!userCreatedAt) return null;
-  const byNearest = await client.query(
-    `SELECT
-       m.medicoid::text AS medicoid,
-       m.nombrecompleto,
-       COALESCE(e.nombre, 'Medicina General') AS especialidad,
-       m.especialidadid,
-       ABS(EXTRACT(EPOCH FROM (m.fecharegistro - $1::timestamptz))) AS diff_seconds
-     FROM medico m
-     LEFT JOIN especialidad e ON e.especialidadid = m.especialidadid
-     ORDER BY diff_seconds ASC
-     LIMIT 1`,
-    [userCreatedAt]
-  );
-  if (!byNearest.rows.length) return null;
-  const diffSeconds = Number(byNearest.rows[0].diff_seconds || 0);
-  if (!Number.isFinite(diffSeconds) || diffSeconds > 86400) return null;
-  return byNearest.rows[0];
+  return result.rows[0] || null;
 }
 
 async function resolveUserContext(client, reqUser) {
@@ -520,7 +471,7 @@ async function resolveUserContext(client, reqUser) {
   const roleId = Number(user.rolid || 0);
 
   if (roleId === PACIENTE_ROLE_ID) {
-    const paciente = await getPacienteByUsuarioId(client, user.usuarioid, user.fechacreacion);
+    const paciente = await getPacienteByUsuarioId(client, user.usuarioid);
     if (!paciente) {
       return { error: { status: 404, message: "Perfil de paciente no encontrado." } };
     }
@@ -528,7 +479,7 @@ async function resolveUserContext(client, reqUser) {
   }
 
   if (roleId === MEDICO_ROLE_ID) {
-    const medico = await getMedicoByUsuarioId(client, user.usuarioid, user.fechacreacion);
+    const medico = await getMedicoByUsuarioId(client, user.usuarioid);
     if (!medico) {
       return { error: { status: 404, message: "Perfil de medico no encontrado." } };
     }
@@ -675,9 +626,10 @@ async function resolveMedicoUserIds(client, medicoId) {
   if (!cleanMedicoId) return [];
 
   const result = await client.query(
-    `SELECT DISTINCT up.usuarioid::text AS usuarioid
-     FROM usuario_perfil up
-     WHERE COALESCE(up.meta_json->>'medicoid', up.meta_json->>'medicoId', '') = $1::text`,
+    `SELECT DISTINCT m.usuarioid::text AS usuarioid
+     FROM medico m
+     WHERE m.medicoid::text = $1::text
+       AND m.usuarioid IS NOT NULL`,
     [cleanMedicoId]
   );
 

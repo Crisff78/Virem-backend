@@ -1,7 +1,7 @@
 const jwt = require("jsonwebtoken");
 const { Server } = require("socket.io");
 const pool = require("../config/db");
-const { getUserProfileById } = require("../services/user-profile.store");
+const { ensureRfCoreSchema } = require("../services/rf-core");
 const { getSocketCorsOrigins } = require("../config/env");
 
 let ioInstance = null;
@@ -23,46 +23,14 @@ function toRoom(prefix, id) {
 
 async function resolveMedicoIdForUser(client, userRow) {
   if (!userRow) return "";
-  const profile = await getUserProfileById(client, userRow.usuarioid);
-  const meta = profile?.meta && typeof profile.meta === "object" ? profile.meta : {};
-
-  const knownMedicoId = normalizeText(meta.medicoid || meta.medicoId);
-  if (knownMedicoId) {
-    const byKnown = await client.query(
-      `SELECT medicoid::text AS medicoid
-       FROM medico
-       WHERE medicoid::text = $1::text
-       LIMIT 1`,
-      [knownMedicoId]
-    );
-    if (byKnown.rows.length) return normalizeText(byKnown.rows[0].medicoid);
-  }
-
-  const byExact = await client.query(
+  const result = await client.query(
     `SELECT medicoid::text AS medicoid
      FROM medico
-     WHERE medicoid::text = $1::text
+     WHERE usuarioid = $1
      LIMIT 1`,
-    [String(userRow.usuarioid)]
+    [Number(userRow.usuarioid)]
   );
-  if (byExact.rows.length) return normalizeText(byExact.rows[0].medicoid);
-
-  if (!userRow.fechacreacion) return "";
-
-  const byNearest = await client.query(
-    `SELECT
-       medicoid::text AS medicoid,
-       ABS(EXTRACT(EPOCH FROM (fecharegistro - $1::timestamptz))) AS diff_seconds
-     FROM medico
-     ORDER BY diff_seconds ASC
-     LIMIT 1`,
-    [userRow.fechacreacion]
-  );
-
-  if (!byNearest.rows.length) return "";
-  const diffSeconds = Number(byNearest.rows[0].diff_seconds || 0);
-  if (!Number.isFinite(diffSeconds) || diffSeconds > 86400) return "";
-  return normalizeText(byNearest.rows[0].medicoid);
+  return normalizeText(result.rows[0]?.medicoid);
 }
 
 async function resolveRealtimeContext(usuarioid) {
@@ -70,6 +38,8 @@ async function resolveRealtimeContext(usuarioid) {
   if (!Number.isFinite(userId) || userId <= 0) {
     return { userId: "", roleId: 0, pacienteId: "", medicoId: "" };
   }
+
+  await ensureRfCoreSchema();
 
   const client = await pool.connect();
   try {
@@ -91,14 +61,14 @@ async function resolveRealtimeContext(usuarioid) {
       const pacienteResult = await client.query(
         `SELECT pacienteid::text AS pacienteid
          FROM paciente
-         WHERE pacienteid = $1
+         WHERE usuarioid = $1
          LIMIT 1`,
         [userId]
       );
       return {
         userId: String(userId),
         roleId,
-        pacienteId: normalizeText(pacienteResult.rows[0]?.pacienteid || String(userId)),
+        pacienteId: normalizeText(pacienteResult.rows[0]?.pacienteid),
         medicoId: "",
       };
     }

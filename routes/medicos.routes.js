@@ -182,16 +182,13 @@ router.get("/", requireAuth, async (req, res) => {
        LEFT JOIN especialidad e ON e.especialidadid = m.especialidadid
        LEFT JOIN rating rv ON rv.medicoid_text = m.medicoid::text
        LEFT JOIN next_slot ns ON ns.medicoid_text = m.medicoid::text
-       LEFT JOIN LATERAL (
-         SELECT up.foto_url
-         FROM usuario_perfil up
-         WHERE (
-           COALESCE(up.meta_json->>'medicoid', up.meta_json->>'medicoId', '') = m.medicoid::text
-           OR up.usuarioid::text = m.medicoid::text
-         )
-         ORDER BY up.updated_at DESC
-         LIMIT 1
-       ) mp ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT up.foto_url
+          FROM usuario_perfil up
+          WHERE up.usuarioid::text = m.usuarioid::text
+          ORDER BY up.updated_at DESC
+          LIMIT 1
+        ) mp ON TRUE
        ${whereClause}
        ORDER BY m.fecharegistro DESC, m.medicoid DESC`
       ,
@@ -302,16 +299,13 @@ router.get("/:id", requireAuth, async (req, res) => {
        LEFT JOIN especialidad e ON e.especialidadid = m.especialidadid
        LEFT JOIN rating rv ON rv.medicoid_text = m.medicoid::text
        LEFT JOIN next_slot ns ON ns.medicoid_text = m.medicoid::text
-       LEFT JOIN LATERAL (
-         SELECT up.foto_url
-         FROM usuario_perfil up
-         WHERE (
-           COALESCE(up.meta_json->>'medicoid', up.meta_json->>'medicoId', '') = m.medicoid::text
-           OR up.usuarioid::text = m.medicoid::text
-         )
-         ORDER BY up.updated_at DESC
-         LIMIT 1
-       ) mp ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT up.foto_url
+          FROM usuario_perfil up
+          WHERE up.usuarioid::text = m.usuarioid::text
+          ORDER BY up.updated_at DESC
+          LIMIT 1
+        ) mp ON TRUE
        WHERE m.medicoid::text = $1::text
        LIMIT 1`,
       [String(req.params.id)]

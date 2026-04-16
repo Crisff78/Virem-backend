@@ -275,6 +275,7 @@ async function sendEmailVerificationCodeEmail({ email, code }) {
 }
 
 let medicoColumnsCache = null;
+let pacienteColumnsCache = null;
 
 function normalizeComparableText(value) {
   return String(value || "")
@@ -366,6 +367,79 @@ async function getMedicoColumns(client) {
   return medicoColumnsCache;
 }
 
+async function getPacienteColumns(client) {
+  if (pacienteColumnsCache) return pacienteColumnsCache;
+
+  const schema = await client.query(
+    `SELECT column_name, is_nullable, column_default, data_type
+     FROM information_schema.columns
+     WHERE table_schema = 'public' AND table_name = 'paciente'`
+  );
+
+  pacienteColumnsCache = new Map(
+    schema.rows.map((row) => [
+      String(row.column_name || "").toLowerCase(),
+      {
+        isNullable: String(row.is_nullable || "").toUpperCase() === "YES",
+        columnDefault: row.column_default,
+        dataType: String(row.data_type || "").toLowerCase(),
+      },
+    ])
+  );
+
+  return pacienteColumnsCache;
+}
+
+async function insertPacienteCompatible({
+  client,
+  usuarioid,
+  nombres,
+  apellidos,
+  fechaSQL,
+  genero,
+  cedulaClean,
+  telefonoClean,
+}) {
+  const pacienteColumns = await getPacienteColumns(client);
+  const columns = [];
+  const valueExpr = [];
+  const params = [];
+
+  const addParam = (column, value) => {
+    columns.push(column);
+    params.push(value);
+    valueExpr.push(`$${params.length}`);
+  };
+
+  const pacienteidMeta = pacienteColumns.get("pacienteid");
+  if (pacienteidMeta && !pacienteidMeta.columnDefault) {
+    addParam("pacienteid", Number(usuarioid));
+  }
+
+  addParam("nombres", String(nombres).trim());
+  addParam("apellidos", String(apellidos).trim());
+  addParam("fechanacimiento", fechaSQL);
+  addParam("genero", String(genero).trim());
+  addParam("cedula", cedulaClean);
+  addParam("telefono", telefonoClean);
+
+  if (pacienteColumns.has("usuarioid")) {
+    addParam("usuarioid", Number(usuarioid));
+  }
+
+  const fecharegistroMeta = pacienteColumns.get("fecharegistro");
+  if (fecharegistroMeta && !fecharegistroMeta.columnDefault) {
+    columns.push("fecharegistro");
+    valueExpr.push("NOW()");
+  }
+
+  const insertSql = `INSERT INTO paciente (${columns.join(", ")})
+                     VALUES (${valueExpr.join(", ")})
+                     RETURNING pacienteid`;
+  const result = await client.query(insertSql, params);
+  return result.rows[0] || null;
+}
+
 async function insertMedicoCompatible({
   client,
   usuarioid,
@@ -399,6 +473,7 @@ async function insertMedicoCompatible({
     }
   }
 
+  if (medicoColumns.has("usuarioid")) addParam("usuarioid", Number(usuarioid));
   if (medicoColumns.has("nombrecompleto")) addParam("nombrecompleto", nombreCompletoTrim);
   if (medicoColumns.has("fechanacimiento")) addParam("fechanacimiento", fechaSQL);
   if (medicoColumns.has("genero")) addParam("genero", generoTrim);
@@ -442,21 +517,10 @@ async function insertMedicoCompatible({
 
 async function getMedicoProfileByUsuarioId(client, usuarioid, userCreatedAt, options = {}) {
   const medicoColumns = await getMedicoColumns(client);
-  const filters = [];
-  const knownMedicoId = String(options?.knownMedicoId || "")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  if (medicoColumns.has("medicoid")) {
-    filters.push("m.medicoid::text = $1::text");
-  }
-  if (medicoColumns.has("usuarioid")) {
-    filters.push("m.usuarioid::text = $1::text");
-  }
+  if (!medicoColumns.has("usuarioid")) return null;
 
   const hasEspecialidadText = medicoColumns.has("especialidad");
   const hasEspecialidadId = medicoColumns.has("especialidadid");
-  const hasFechaRegistro = medicoColumns.has("fecharegistro");
 
   const especialidadExpr = hasEspecialidadText
     ? `m.especialidad AS "especialidad"`
@@ -498,21 +562,15 @@ async function getMedicoProfileByUsuarioId(client, usuarioid, userCreatedAt, opt
     fecharegistro: row.fecharegistro ?? null,
   });
 
-  if (knownMedicoId) {
-    const byKnownIdSql = buildQuery(`WHERE m.medicoid::text = $1::text`);
-    const byKnownId = await client.query(byKnownIdSql, [knownMedicoId]);
-    if (byKnownId.rows.length) {
-      return normalizeRow(byKnownId.rows[0]);
-    }
+  const directResult = await client.query(
+    buildQuery(`WHERE m.usuarioid = $1`),
+    [Number(usuarioid)]
+  );
+  if (directResult.rows.length) {
+    return normalizeRow(directResult.rows[0]);
   }
 
-  if (filters.length) {
-    const directSql = buildQuery(`WHERE ${filters.join(" OR ")}`);
-    const directResult = await client.query(directSql, [String(usuarioid)]);
-    if (directResult.rows.length) {
-      return normalizeRow(directResult.rows[0]);
-    }
-  }
+  return null;
 
   // Fallback para esquemas sin FK usuarioid/medicoid: empata por timestamp de creación.
   if (userCreatedAt && hasFechaRegistro) {
@@ -591,6 +649,9 @@ async function getMedicoProfileByUsuarioId(client, usuarioid, userCreatedAt, opt
 }
 
 async function getPacienteProfileByUsuarioId(client, usuarioid, userCreatedAt) {
+  const pacienteColumns = await getPacienteColumns(client);
+  if (!pacienteColumns.has("usuarioid")) return null;
+
   const directResult = await client.query(
     `SELECT
        p.pacienteid,
@@ -602,14 +663,16 @@ async function getPacienteProfileByUsuarioId(client, usuarioid, userCreatedAt) {
        p.telefono,
        p.fecharegistro
      FROM paciente p
-     WHERE p.pacienteid::text = $1::text
+     WHERE p.usuarioid = $1
      LIMIT 1`,
-    [String(usuarioid)]
+    [Number(usuarioid)]
   );
 
   if (directResult.rows.length) {
     return directResult.rows[0];
   }
+
+  return null;
 
   if (userCreatedAt) {
     const byRank = await client.query(
@@ -705,37 +768,12 @@ async function buildAuthUserPayload(client, userRow) {
   const isPaciente = Number(userRow.rolid) === PACIENTE_ROLE_ID;
 
   if (isMedico) {
-    const knownMedicoId = String(meta.medicoid || meta.medicoId || "")
-      .replace(/\s+/g, " ")
-      .trim();
-    const medicoProfile = await getMedicoProfileByUsuarioId(
-      client,
-      userRow.usuarioid,
-      userRow.fechacreacion,
-      { knownMedicoId }
-    );
+    const medicoProfile = await getMedicoProfileByUsuarioId(client, userRow.usuarioid);
     if (medicoProfile) {
       Object.assign(payload, medicoProfile);
-
-      const medicoIdResolved = String(medicoProfile.medicoid || "").trim();
-      if (medicoIdResolved && medicoIdResolved !== knownMedicoId) {
-        try {
-          await upsertUserProfileById(client, userRow.usuarioid, {
-            meta: {
-              ...meta,
-              medicoid: medicoIdResolved,
-            },
-          });
-          meta.medicoid = medicoIdResolved;
-        } catch (_) {}
-      }
     }
   } else if (isPaciente) {
-    const pacienteProfile = await getPacienteProfileByUsuarioId(
-      client,
-      userRow.usuarioid,
-      userRow.fechacreacion
-    );
+    const pacienteProfile = await getPacienteProfileByUsuarioId(client, userRow.usuarioid);
 
     if (pacienteProfile) {
       const nombres = String(pacienteProfile.nombres || '').trim();
@@ -767,7 +805,6 @@ async function buildAuthUserPayload(client, userRow) {
       }
     };
 
-    assignIfMissing("medicoid", meta.medicoid || meta.medicoId);
     assignIfMissing("nombreCompleto", meta.nombreCompleto);
     assignIfMissing("especialidad", meta.especialidad);
     assignIfMissing("cedula", meta.cedula);
@@ -907,20 +944,16 @@ router.post("/register", async (req, res) => {
 
     const usuarioid = insertUsuario.rows[0].usuarioid;
 
-    const insertPaciente = await client.query(
-      `INSERT INTO paciente (pacienteid, nombres, apellidos, fechanacimiento, genero, cedula, telefono, fecharegistro)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
-       RETURNING pacienteid`,
-      [
-        usuarioid,
-        String(nombres).trim(),
-        String(apellidos).trim(),
-        fechaSQL,
-        String(genero).trim(),
-        String(cedula).replace(/\D/g, "").slice(0, 11),
-        String(telefono).replace(/\D/g, "").slice(0, 11),
-      ]
-    );
+    const insertPaciente = await insertPacienteCompatible({
+      client,
+      usuarioid,
+      nombres,
+      apellidos,
+      fechaSQL,
+      genero,
+      cedulaClean: String(cedula).replace(/\D/g, "").slice(0, 11),
+      telefonoClean: String(telefono).replace(/\D/g, "").slice(0, 11),
+    });
 
     if (requireEmailVerification) {
       verificationCodePayload = await createEmailVerificationCode(client, {
@@ -945,7 +978,7 @@ router.post("/register", async (req, res) => {
       message: requireEmailVerification
         ? "Paciente registrado. Debes verificar tu correo para activar la cuenta."
         : "Paciente registrado correctamente.",
-      pacienteid: insertPaciente.rows[0].pacienteid,
+      pacienteid: insertPaciente?.pacienteid ?? null,
       usuarioid,
       accountStatus,
       requiresEmailVerification: requireEmailVerification,
@@ -1201,7 +1234,6 @@ router.post("/register-medico", async (req, res) => {
 
     const profilePatch = {
       meta: {
-        medicoid: String(medicoRow.medicoid || "").trim(),
         nombreCompleto: nombreCompletoTrim,
         especialidad: especialidadTrim,
         cedula: cedulaClean,

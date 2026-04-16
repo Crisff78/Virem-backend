@@ -739,13 +739,13 @@ router.get("/me/citas", requireAuth, async (req, res) => {
          LEFT JOIN medico m ON m.medicoid = c.medicoid
          LEFT JOIN especialidad e ON e.especialidadid = m.especialidadid
          LEFT JOIN conversaciones conv ON conv.citaid = c.citaid
-         LEFT JOIN LATERAL (
-           SELECT up.foto_url
-           FROM usuario_perfil up
-           WHERE COALESCE(up.meta_json->>'medicoid', up.meta_json->>'medicoId', '') = m.medicoid::text
-           ORDER BY up.updated_at DESC
-           LIMIT 1
-         ) mp ON TRUE
+          LEFT JOIN LATERAL (
+            SELECT up.foto_url
+            FROM usuario_perfil up
+            WHERE up.usuarioid::text = m.usuarioid::text
+            ORDER BY up.updated_at DESC
+            LIMIT 1
+          ) mp ON TRUE
          WHERE c.pacienteid = $1
            AND ${scopeWhere}
          ORDER BY ${orderBy}

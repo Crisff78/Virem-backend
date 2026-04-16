@@ -9,6 +9,7 @@ const MIGRATIONS = [
   "db/fase3_citas_tiempo_real.sql",
   "db/fase4_optimizacion_agenda_chat_video.sql",
   "db/fase5_rf_funcionalidades_clinicas.sql",
+  "db/fase6_vinculo_usuario_perfiles.sql",
 ];
 
 async function getCitaPacienteColumnType(client) {

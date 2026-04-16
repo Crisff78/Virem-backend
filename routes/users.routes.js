@@ -118,28 +118,7 @@ function toSqlDate(rawValue) {
 }
 
 async function getMedicoByUsuarioId(client, usuarioid, userCreatedAt, knownMedicoId = '') {
-  const knownId = String(knownMedicoId || '').trim();
-  if (knownId) {
-    const byKnownId = await client.query(
-      `SELECT
-         m.medicoid::text AS medicoid,
-         m.nombrecompleto,
-         m.fechanacimiento,
-         m.genero,
-         m.cedula,
-         m.telefono,
-         COALESCE(e.nombre, 'Medicina General') AS especialidad,
-         m.fecharegistro
-       FROM medico m
-       LEFT JOIN especialidad e ON e.especialidadid = m.especialidadid
-       WHERE m.medicoid::text = $1::text
-       LIMIT 1`,
-      [knownId]
-    );
-    if (byKnownId.rows.length) return byKnownId.rows[0];
-  }
-
-  const direct = await client.query(
+  const result = await client.query(
     `SELECT
        m.medicoid::text AS medicoid,
        m.nombrecompleto,
@@ -151,86 +130,15 @@ async function getMedicoByUsuarioId(client, usuarioid, userCreatedAt, knownMedic
        m.fecharegistro
      FROM medico m
      LEFT JOIN especialidad e ON e.especialidadid = m.especialidadid
-     WHERE m.medicoid::text = $1::text
+     WHERE m.usuarioid = $1
      LIMIT 1`,
-    [String(usuarioid)]
+    [Number(usuarioid)]
   );
-
-  if (direct.rows.length) return direct.rows[0];
-  if (!userCreatedAt) return null;
-
-  const byRank = await client.query(
-    `WITH user_rank AS (
-       SELECT
-         u.usuarioid,
-         u.fechacreacion,
-         ROW_NUMBER() OVER (ORDER BY u.fechacreacion DESC, u.usuarioid DESC) AS rn
-       FROM usuario u
-       WHERE u.rolid = $2
-     ),
-     medico_rank AS (
-       SELECT
-         m.medicoid::text AS medicoid,
-         m.nombrecompleto,
-         m.fechanacimiento,
-         m.genero,
-         m.cedula,
-         m.telefono,
-         COALESCE(e.nombre, 'Medicina General') AS especialidad,
-         m.fecharegistro,
-         ROW_NUMBER() OVER (ORDER BY m.fecharegistro DESC, m.medicoid DESC) AS rn
-       FROM medico m
-       LEFT JOIN especialidad e ON e.especialidadid = m.especialidadid
-     )
-     SELECT
-       mr.*,
-       ABS(EXTRACT(EPOCH FROM ((mr.fecharegistro::timestamp) - (ur.fechacreacion::timestamp)))) AS diff_seconds
-     FROM user_rank ur
-     JOIN medico_rank mr ON mr.rn = ur.rn
-     WHERE ur.usuarioid = $1
-     LIMIT 1`,
-    [Number(usuarioid), MEDICO_ROLE_ID]
-  );
-
-  if (byRank.rows.length) {
-    const row = byRank.rows[0];
-    const diffSeconds = Number(row.diff_seconds || 0);
-    if (Number.isFinite(diffSeconds) && diffSeconds <= 86400) {
-      return row;
-    }
-  }
-
-  const byNearest = await client.query(
-    `SELECT
-       m.medicoid::text AS medicoid,
-       m.nombrecompleto,
-       m.fechanacimiento,
-       m.genero,
-       m.cedula,
-       m.telefono,
-       COALESCE(e.nombre, 'Medicina General') AS especialidad,
-       m.fecharegistro,
-       ABS(EXTRACT(EPOCH FROM (m.fecharegistro - $1::timestamptz))) AS diff_seconds
-     FROM medico m
-     LEFT JOIN especialidad e ON e.especialidadid = m.especialidadid
-     ORDER BY diff_seconds ASC
-     LIMIT 1`,
-    [userCreatedAt]
-  );
-
-  if (byNearest.rows.length) {
-    const row = byNearest.rows[0];
-    const diffSeconds = Number(row.diff_seconds || 0);
-    if (Number.isFinite(diffSeconds) && diffSeconds <= 86400) {
-      return row;
-    }
-  }
-
-  return null;
+  return result.rows[0] || null;
 }
 
 async function getPacienteByUsuarioId(client, usuarioid, userCreatedAt) {
-  const direct = await client.query(
+  const result = await client.query(
     `SELECT
        p.pacienteid,
        p.nombres,
@@ -241,84 +149,11 @@ async function getPacienteByUsuarioId(client, usuarioid, userCreatedAt) {
        p.telefono,
        p.fecharegistro
      FROM paciente p
-     WHERE p.pacienteid = $1
+     WHERE p.usuarioid = $1
      LIMIT 1`,
     [Number(usuarioid)]
   );
-
-  if (direct.rows.length) return direct.rows[0];
-  if (!userCreatedAt) return null;
-
-  const byRank = await client.query(
-    `WITH user_rank AS (
-       SELECT
-         u.usuarioid,
-         u.fechacreacion,
-         ROW_NUMBER() OVER (ORDER BY u.fechacreacion DESC, u.usuarioid DESC) AS rn
-       FROM usuario u
-       WHERE u.rolid = $2
-     ),
-     paciente_rank AS (
-       SELECT
-         p.pacienteid,
-         p.nombres,
-         p.apellidos,
-         p.fechanacimiento,
-         p.genero,
-         p.cedula,
-         p.telefono,
-         p.fecharegistro,
-         ROW_NUMBER() OVER (ORDER BY p.fecharegistro DESC, p.pacienteid DESC) AS rn
-       FROM paciente p
-     )
-     SELECT
-       pr.*,
-       ABS(
-         EXTRACT(
-           EPOCH FROM ((pr.fecharegistro::timestamp) - (ur.fechacreacion::timestamp))
-         )
-       ) AS diff_seconds
-     FROM user_rank ur
-     JOIN paciente_rank pr ON pr.rn = ur.rn
-     WHERE ur.usuarioid = $1
-     LIMIT 1`,
-    [Number(usuarioid), PACIENTE_ROLE_ID]
-  );
-
-  if (byRank.rows.length) {
-    const row = byRank.rows[0];
-    const diffSeconds = Number(row.diff_seconds || 0);
-    if (Number.isFinite(diffSeconds) && diffSeconds <= 86400) {
-      return row;
-    }
-  }
-
-  const byNearest = await client.query(
-    `SELECT
-       p.pacienteid,
-       p.nombres,
-       p.apellidos,
-       p.fechanacimiento,
-       p.genero,
-       p.cedula,
-       p.telefono,
-       p.fecharegistro,
-       ABS(EXTRACT(EPOCH FROM ((p.fecharegistro::timestamp) - ($1::timestamp)))) AS diff_seconds
-     FROM paciente p
-     ORDER BY diff_seconds ASC
-     LIMIT 1`,
-    [userCreatedAt]
-  );
-
-  if (byNearest.rows.length) {
-    const row = byNearest.rows[0];
-    const diffSeconds = Number(row.diff_seconds || 0);
-    if (Number.isFinite(diffSeconds) && diffSeconds <= 86400) {
-      return row;
-    }
-  }
-
-  return null;
+  return result.rows[0] || null;
 }
 
 async function ensureEstadoCitaBase(client) {
@@ -1273,27 +1108,7 @@ router.get('/me/dashboard-medico', requireAuth, async (req, res) => {
     const profileDb = await getUserProfileById(client, user.usuarioid);
     const profileMeta =
       profileDb?.meta && typeof profileDb.meta === 'object' ? profileDb.meta : {};
-    const knownMedicoId = String(profileMeta.medicoid || profileMeta.medicoId || '').trim();
-    const medico = await getMedicoByUsuarioId(
-      client,
-      user.usuarioid,
-      user.fechacreacion,
-      knownMedicoId
-    );
-
-    if (medico) {
-      const resolvedMedicoId = String(medico.medicoid || '').trim();
-      if (resolvedMedicoId && resolvedMedicoId !== knownMedicoId) {
-        try {
-          await upsertUserProfileById(client, user.usuarioid, {
-            meta: {
-              ...profileMeta,
-              medicoid: resolvedMedicoId,
-            },
-          });
-        } catch (_) {}
-      }
-    }
+    const medico = await getMedicoByUsuarioId(client, user.usuarioid);
 
     if (!medico) {
       return res.json({
@@ -1302,7 +1117,7 @@ router.get('/me/dashboard-medico', requireAuth, async (req, res) => {
           profile: {
             usuarioid: user.usuarioid,
             email: user.email,
-            medicoid: knownMedicoId || null,
+            medicoid: null,
             nombreCompleto: String(profileMeta.nombreCompleto || '').trim() || null,
             especialidad: String(profileMeta.especialidad || '').trim() || null,
             cedula: String(profileMeta.cedula || '').trim() || null,
@@ -1413,15 +1228,12 @@ router.get('/me/citas', requireAuth, async (req, res) => {
          LEFT JOIN medico m ON m.medicoid::text = c.medicoid::text
          LEFT JOIN especialidad e ON e.especialidadid = m.especialidadid
          LEFT JOIN LATERAL (
-           SELECT up.foto_url
-           FROM usuario_perfil up
-           WHERE (
-             COALESCE(up.meta_json->>'medicoid', up.meta_json->>'medicoId', '') = m.medicoid::text
-             OR up.usuarioid::text = m.medicoid::text
-           )
-           ORDER BY up.updated_at DESC
-           LIMIT 1
-         ) mp ON TRUE
+            SELECT up.foto_url
+            FROM usuario_perfil up
+            WHERE up.usuarioid::text = m.usuarioid::text
+            ORDER BY up.updated_at DESC
+            LIMIT 1
+          ) mp ON TRUE
          WHERE c.pacienteid = $1
            AND ${scopeWhere}
          ORDER BY ${scopeOrder}
@@ -1454,29 +1266,9 @@ router.get('/me/citas', requireAuth, async (req, res) => {
 
     if (Number(user.rolid) === MEDICO_ROLE_ID) {
       const profileDb = await getUserProfileById(client, user.usuarioid);
-      const profileMeta =
-        profileDb?.meta && typeof profileDb.meta === 'object' ? profileDb.meta : {};
-      const knownMedicoId = String(profileMeta.medicoid || profileMeta.medicoId || '').trim();
-      const medico = await getMedicoByUsuarioId(
-        client,
-        user.usuarioid,
-        user.fechacreacion,
-        knownMedicoId
-      );
+      const medico = await getMedicoByUsuarioId(client, user.usuarioid);
       if (!medico) {
         return res.status(404).json({ success: false, message: 'Perfil de medico no encontrado.' });
-      }
-
-      const resolvedMedicoId = String(medico.medicoid || '').trim();
-      if (resolvedMedicoId && resolvedMedicoId !== knownMedicoId) {
-        try {
-          await upsertUserProfileById(client, user.usuarioid, {
-            meta: {
-              ...profileMeta,
-              medicoid: resolvedMedicoId,
-            },
-          });
-        } catch (_) {}
       }
 
       const citasResult = await client.query(
@@ -1905,15 +1697,7 @@ router.patch('/me/citas/:citaId/manage', requireAuth, async (req, res) => {
     }
 
     const profileDb = await getUserProfileById(client, user.usuarioid);
-    const profileMeta =
-      profileDb?.meta && typeof profileDb.meta === 'object' ? profileDb.meta : {};
-    const knownMedicoId = String(profileMeta.medicoid || profileMeta.medicoId || '').trim();
-    const medico = await getMedicoByUsuarioId(
-      client,
-      user.usuarioid,
-      user.fechacreacion,
-      knownMedicoId
-    );
+    const medico = await getMedicoByUsuarioId(client, user.usuarioid);
     if (!medico) {
       await client.query('ROLLBACK');
       return res.status(404).json({ success: false, message: 'Perfil de medico no encontrado.' });

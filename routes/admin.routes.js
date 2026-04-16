@@ -163,10 +163,7 @@ router.get("/medicos/pendientes", async (req, res) => {
        FROM usuario u
        LEFT JOIN usuario_perfil up ON up.usuarioid::text = u.usuarioid::text
        LEFT JOIN medico m
-         ON (
-           m.medicoid::text = COALESCE(up.meta_json->>'medicoid', up.meta_json->>'medicoId', '')
-           OR m.medicoid::text = u.usuarioid::text
-         )
+         ON m.usuarioid = u.usuarioid
        LEFT JOIN especialidad e ON e.especialidadid = m.especialidadid
        WHERE u.rolid = 2
          AND u.account_status = $1
