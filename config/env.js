@@ -14,9 +14,23 @@ function normalizeList(value) {
         .filter(Boolean);
 }
 
+function toOrigin(value) {
+    const raw = String(value || "").trim();
+    if (!raw) return "";
+
+    try {
+        return new URL(raw).origin;
+    } catch (err) {
+        return "";
+    }
+}
+
 function getAllowedCorsOrigins() {
     const envList = normalizeList(process.env.CORS_ORIGIN);
     if (envList.length > 0) return envList;
+
+    const publicWebOrigin = toOrigin(process.env.PUBLIC_WEB_URL);
+    if (publicWebOrigin) return [publicWebOrigin];
 
     if (String(process.env.NODE_ENV || "").toLowerCase() === "production") {
         return [];
@@ -74,8 +88,10 @@ function validateCriticalEnv() {
             errors.push("JWT_SECRET must have at least 32 characters in production.");
         }
 
-        if (!String(process.env.CORS_ORIGIN || "").trim()) {
-            warnings.push("CORS_ORIGIN is empty in production; browser clients may be blocked.");
+        if (!String(process.env.CORS_ORIGIN || "").trim() && !toOrigin(process.env.PUBLIC_WEB_URL)) {
+            warnings.push(
+                "CORS_ORIGIN is empty in production and PUBLIC_WEB_URL is missing/invalid; browser clients may be blocked."
+            );
         }
     }
 
