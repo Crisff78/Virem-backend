@@ -1,14 +1,43 @@
 const express = require('express');
 const pool = require('../config/db');
 const { requireAuth } = require('./middleware/auth');
+const {
+  ADMIN_ROLE_ID,
+  requireRole,
+  requireOwnership,
+} = require('./middleware/access-control');
 
 const router = express.Router();
+
+async function resolvePacienteOwner(req) {
+  const result = await pool.query(
+    `SELECT usuarioid
+     FROM paciente
+     WHERE pacienteid = $1
+     LIMIT 1`,
+    [req.params.id]
+  );
+
+  if (!result.rows.length) {
+    return {
+      exists: false,
+      notFoundMessage: 'Paciente no encontrado.',
+    };
+  }
+
+  return {
+    exists: true,
+    ownerUserIds: [result.rows[0].usuarioid],
+    notFoundMessage: 'Paciente no encontrado.',
+    forbiddenMessage: 'No puedes acceder al perfil de otro paciente.',
+  };
+}
 
 // ===============================
 // API: Listar pacientes
 // Endpoint: GET /api/pacientes
 // ===============================
-router.get('/', requireAuth, async (req, res) => {
+router.get('/', requireAuth, requireRole(ADMIN_ROLE_ID), async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT pacienteid, nombres, apellidos, fechanacimiento, genero, cedula, telefono, fecharegistro
@@ -26,7 +55,11 @@ router.get('/', requireAuth, async (req, res) => {
 // API: Obtener paciente por ID
 // Endpoint: GET /api/pacientes/:id
 // ===============================
-router.get('/:id', requireAuth, async (req, res) => {
+router.get(
+  '/:id',
+  requireAuth,
+  requireOwnership(resolvePacienteOwner, { allowRoles: [ADMIN_ROLE_ID] }),
+  async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT pacienteid, nombres, apellidos, fechanacimiento, genero, cedula, telefono, fecharegistro
@@ -50,7 +83,7 @@ router.get('/:id', requireAuth, async (req, res) => {
 // API: Crear paciente
 // Endpoint: POST /api/pacientes
 // ===============================
-router.post('/', requireAuth, async (req, res) => {
+router.post('/', requireAuth, requireRole(ADMIN_ROLE_ID), async (req, res) => {
   const { nombres, apellidos, fechanacimiento, genero, cedula, telefono } = req.body;
 
   if (!nombres || !apellidos || !fechanacimiento || !genero || !cedula || !telefono) {
@@ -83,7 +116,11 @@ router.post('/', requireAuth, async (req, res) => {
 // API: Actualizar paciente
 // Endpoint: PUT /api/pacientes/:id
 // ===============================
-router.put('/:id', requireAuth, async (req, res) => {
+router.put(
+  '/:id',
+  requireAuth,
+  requireOwnership(resolvePacienteOwner, { allowRoles: [ADMIN_ROLE_ID] }),
+  async (req, res) => {
   const { nombres, apellidos, fechanacimiento, genero, cedula, telefono } = req.body;
 
   if (!nombres || !apellidos || !fechanacimiento || !genero || !cedula || !telefono) {
@@ -127,7 +164,7 @@ router.put('/:id', requireAuth, async (req, res) => {
 // API: Eliminar paciente
 // Endpoint: DELETE /api/pacientes/:id
 // ===============================
-router.delete('/:id', requireAuth, async (req, res) => {
+router.delete('/:id', requireAuth, requireRole(ADMIN_ROLE_ID), async (req, res) => {
   try {
     const result = await pool.query(
       `DELETE FROM paciente

@@ -9,6 +9,7 @@
     "migrate:agenda": "node scripts/run-agenda-migrations.js",
     "test": "npm run test:functional:smoke",
     "test:functional:smoke": "node scripts/smoke-test.js",
+    "test:socket:auth": "node scripts/socket-auth-check.js",
     "test:performance": "node scripts/performance-test.js"
   },
   "keywords": [],
@@ -33,6 +34,7 @@
   },
   "devDependencies": {
     "autocannon": "^8.0.0",
-    "nodemon": "^3.1.11"
+    "nodemon": "^3.1.11",
+    "socket.io-client": "^4.8.3"
   }
 }

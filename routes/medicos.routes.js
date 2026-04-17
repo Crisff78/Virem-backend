@@ -3,6 +3,11 @@ const { randomUUID } = require("crypto");
 const pool = require("../config/db");
 const { requireAuth } = require("./middleware/auth");
 const {
+  ADMIN_ROLE_ID,
+  requireRole,
+  requireOwnership,
+} = require("./middleware/access-control");
+const {
   ensureUserProfileTable,
   isSupportedImageUri,
 } = require("../services/user-profile.store");
@@ -10,6 +15,7 @@ const { ensurePlatformSchema } = require("../services/platform-core");
 const { ensureRfCoreSchema } = require("../services/rf-core");
 
 const router = express.Router();
+const MEDICO_ROLE_ID = 2;
 
 function normalizeComparableText(value) {
   return String(value || "")
@@ -93,6 +99,72 @@ async function resolveEspecialidadId(client, especialidadValue) {
   }
 }
 
+async function resolveMedicoOwner(req) {
+  const result = await pool.query(
+    `SELECT usuarioid
+     FROM medico
+     WHERE medicoid::text = $1::text
+     LIMIT 1`,
+    [String(req.params.id || "")]
+  );
+
+  if (!result.rows.length) {
+    return {
+      exists: false,
+      notFoundMessage: "Medico no encontrado.",
+    };
+  }
+
+  return {
+    exists: true,
+    ownerUserIds: [result.rows[0].usuarioid],
+    notFoundMessage: "Medico no encontrado.",
+    forbiddenMessage: "No puedes modificar el perfil de otro medico.",
+  };
+}
+
+function getActorFromRequest(req) {
+  if (req.accessControl?.actor) {
+    return req.accessControl.actor;
+  }
+
+  return {
+    usuarioid: Number.parseInt(String(req.user?.usuarioid || ""), 10) || 0,
+    roleId: Number.parseInt(String(req.user?.rolid || ""), 10) || 0,
+  };
+}
+
+function sanitizeMedicoForAudience(row, actor, options = {}) {
+  const rowOwnerUserId = Number.parseInt(String(row?.usuarioid || ""), 10);
+  const isOwner =
+    actor && Number.isFinite(rowOwnerUserId) && rowOwnerUserId > 0
+      ? Number(actor.usuarioid) === rowOwnerUserId
+      : false;
+  const isAdmin = Number(actor?.roleId || 0) === ADMIN_ROLE_ID;
+  const exposeSensitive = isOwner || isAdmin;
+
+  return {
+    medicoid: String(row?.medicoid || "").trim(),
+    nombreCompleto: String(row?.nombreCompleto || "").trim(),
+    fechanacimiento: exposeSensitive ? row?.fechanacimiento || null : null,
+    genero: exposeSensitive ? String(row?.genero || "").trim() || null : null,
+    cedula: exposeSensitive ? String(row?.cedula || "").trim() || null : null,
+    telefono: exposeSensitive ? String(row?.telefono || "").trim() || null : null,
+    consultorio: String(row?.consultorio || "").trim() || null,
+    especialidadid: row?.especialidadid ? Number(row.especialidadid) : null,
+    especialidad: String(row?.especialidad || "").trim() || "Medicina General",
+    permitePresencial: Boolean(row?.permitePresencial),
+    permiteVirtual: Boolean(row?.permiteVirtual),
+    ratingPromedio: Number(row?.ratingPromedio || 0),
+    totalValoraciones: Number(row?.totalValoraciones || 0),
+    proximoHorarioDisponible: row?.proximoHorarioDisponible || null,
+    fotoUrl: isSupportedImageUri(row?.fotoUrl || null)
+      ? String(row?.fotoUrl || "").trim() || null
+      : null,
+    fecharegistro: row?.fecharegistro || null,
+  };
+}
+
 // ===============================
 // API: Listar medicos
 // Endpoint: GET /api/medicos
@@ -111,6 +183,7 @@ router.get("/", requireAuth, async (req, res) => {
     await ensureUserProfileTable();
     await ensurePlatformSchema();
     await ensureRfCoreSchema();
+    const actor = getActorFromRequest(req);
 
     const filters = [];
     const params = [];
@@ -164,6 +237,7 @@ router.get("/", requireAuth, async (req, res) => {
        SELECT
          m.medicoid::text AS "medicoid",
          m.nombrecompleto AS "nombreCompleto",
+         m.usuarioid,
          m.fechanacimiento,
          m.genero,
          m.cedula,
@@ -194,17 +268,9 @@ router.get("/", requireAuth, async (req, res) => {
       ,
       params
     );
-    const medicos = result.rows.map((row) => ({
-      ...row,
-      permitePresencial: Boolean(row.permitePresencial),
-      permiteVirtual: Boolean(row.permiteVirtual),
-      ratingPromedio: Number(row.ratingPromedio || 0),
-      totalValoraciones: Number(row.totalValoraciones || 0),
-      proximoHorarioDisponible: row.proximoHorarioDisponible || null,
-      fotoUrl: isSupportedImageUri(row.fotoUrl || null)
-        ? String(row.fotoUrl || "").trim() || null
-        : null,
-    }));
+    const medicos = result.rows.map((row) =>
+      sanitizeMedicoForAudience(row, actor, { directoryView: true })
+    );
     return res.json({ success: true, medicos });
   } catch (err) {
     console.error("Error GET /medicos:", err);
@@ -257,6 +323,7 @@ router.get("/:id", requireAuth, async (req, res) => {
     await ensureUserProfileTable();
     await ensurePlatformSchema();
     await ensureRfCoreSchema();
+    const actor = getActorFromRequest(req);
 
     const result = await pool.query(
       `WITH rating AS (
@@ -281,6 +348,7 @@ router.get("/:id", requireAuth, async (req, res) => {
        SELECT
          m.medicoid::text AS "medicoid",
          m.nombrecompleto AS "nombreCompleto",
+         m.usuarioid,
          m.fechanacimiento,
          m.genero,
          m.cedula,
@@ -315,17 +383,9 @@ router.get("/:id", requireAuth, async (req, res) => {
       return res.status(404).json({ success: false, message: "Medico no encontrado." });
     }
 
-    const medico = {
-      ...result.rows[0],
-      permitePresencial: Boolean(result.rows[0].permitePresencial),
-      permiteVirtual: Boolean(result.rows[0].permiteVirtual),
-      ratingPromedio: Number(result.rows[0].ratingPromedio || 0),
-      totalValoraciones: Number(result.rows[0].totalValoraciones || 0),
-      proximoHorarioDisponible: result.rows[0].proximoHorarioDisponible || null,
-      fotoUrl: isSupportedImageUri(result.rows[0].fotoUrl || null)
-        ? String(result.rows[0].fotoUrl || "").trim() || null
-        : null,
-    };
+    const medico = sanitizeMedicoForAudience(result.rows[0], actor, {
+      directoryView: false,
+    });
 
     return res.json({ success: true, medico });
   } catch (err) {
@@ -338,7 +398,7 @@ router.get("/:id", requireAuth, async (req, res) => {
 // API: Crear medico
 // Endpoint: POST /api/medicos
 // ===============================
-router.post("/", requireAuth, async (req, res) => {
+router.post("/", requireAuth, requireRole(ADMIN_ROLE_ID), async (req, res) => {
   const {
     nombreCompleto,
     fechanacimiento,
@@ -414,7 +474,11 @@ router.post("/", requireAuth, async (req, res) => {
 // API: Actualizar medico
 // Endpoint: PUT /api/medicos/:id
 // ===============================
-router.put("/:id", requireAuth, async (req, res) => {
+router.put(
+  "/:id",
+  requireAuth,
+  requireOwnership(resolveMedicoOwner, { allowRoles: [ADMIN_ROLE_ID] }),
+  async (req, res) => {
   const {
     nombreCompleto,
     fechanacimiento,
@@ -439,6 +503,14 @@ router.put("/:id", requireAuth, async (req, res) => {
   let client;
   try {
     client = await pool.connect();
+    const actor = getActorFromRequest(req);
+    if (actor.roleId !== ADMIN_ROLE_ID && actor.roleId !== MEDICO_ROLE_ID) {
+      return res.status(403).json({
+        success: false,
+        message: "Solo administradores o el medico propietario pueden actualizar este perfil.",
+      });
+    }
+
     const especialidadid = await resolveEspecialidadId(client, especialidad);
 
     const result = await client.query(
@@ -497,7 +569,7 @@ router.put("/:id", requireAuth, async (req, res) => {
 // API: Eliminar medico
 // Endpoint: DELETE /api/medicos/:id
 // ===============================
-router.delete("/:id", requireAuth, async (req, res) => {
+router.delete("/:id", requireAuth, requireRole(ADMIN_ROLE_ID), async (req, res) => {
   try {
     const result = await pool.query(
       `DELETE FROM medico

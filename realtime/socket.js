@@ -21,6 +21,26 @@ function toRoom(prefix, id) {
   return `${prefix}:${clean}`;
 }
 
+function getSocketAuth(socket) {
+  return socket.data?.auth || {};
+}
+
+function getSocketRealtimeScopes(socket) {
+  if (!socket.data.realtimeScopes) {
+    socket.data.realtimeScopes = {
+      citas: new Set(),
+      conversations: new Set(),
+    };
+  }
+  return socket.data.realtimeScopes;
+}
+
+function respondToSocketAction(callback, payload) {
+  if (typeof callback === "function") {
+    callback(payload);
+  }
+}
+
 async function resolveMedicoIdForUser(client, userRow) {
   if (!userRow) return "";
   const result = await client.query(
@@ -86,6 +106,183 @@ async function resolveRealtimeContext(usuarioid) {
     return { userId: String(userId), roleId, pacienteId: "", medicoId: "" };
   } finally {
     client.release();
+  }
+}
+
+async function canAccessCita(client, auth, citaId) {
+  const cleanCitaId = normalizeText(citaId);
+  const pacienteId = normalizeText(auth?.pacienteId);
+  const medicoId = normalizeText(auth?.medicoId);
+  const roleId = Number(auth?.roleId || 0);
+
+  if (!cleanCitaId) {
+    return { ok: false, code: "cita_id_invalid" };
+  }
+
+  if (roleId === PACIENTE_ROLE_ID && pacienteId) {
+    const result = await client.query(
+      `SELECT
+         c.citaid::text AS citaid,
+         c.pacienteid::text AS pacienteid,
+         c.medicoid::text AS medicoid
+       FROM cita c
+       WHERE c.citaid::text = $1::text
+         AND c.pacienteid = $2
+       LIMIT 1`,
+      [cleanCitaId, Number(pacienteId)]
+    );
+
+    if (result.rows.length) {
+      return { ok: true, cita: result.rows[0] };
+    }
+
+    return { ok: false, code: "cita_forbidden" };
+  }
+
+  if (roleId === MEDICO_ROLE_ID && medicoId) {
+    const result = await client.query(
+      `SELECT
+         c.citaid::text AS citaid,
+         c.pacienteid::text AS pacienteid,
+         c.medicoid::text AS medicoid
+       FROM cita c
+       WHERE c.citaid::text = $1::text
+         AND c.medicoid::text = $2::text
+       LIMIT 1`,
+      [cleanCitaId, medicoId]
+    );
+
+    if (result.rows.length) {
+      return { ok: true, cita: result.rows[0] };
+    }
+
+    return { ok: false, code: "cita_forbidden" };
+  }
+
+  return { ok: false, code: "role_not_allowed" };
+}
+
+async function canAccessConversation(client, auth, conversationId) {
+  const cleanConversationId = normalizeText(conversationId);
+  const pacienteId = normalizeText(auth?.pacienteId);
+  const medicoId = normalizeText(auth?.medicoId);
+  const roleId = Number(auth?.roleId || 0);
+
+  if (!cleanConversationId) {
+    return { ok: false, code: "conversation_id_invalid" };
+  }
+
+  if (roleId === PACIENTE_ROLE_ID && pacienteId) {
+    const result = await client.query(
+      `SELECT
+         conv.conversacionid::text AS conversacionid,
+         conv.citaid::text AS citaid,
+         conv.pacienteid::text AS pacienteid,
+         conv.medicoid::text AS medicoid
+       FROM conversaciones conv
+       WHERE conv.conversacionid::text = $1::text
+         AND conv.pacienteid = $2
+       LIMIT 1`,
+      [cleanConversationId, Number(pacienteId)]
+    );
+
+    if (result.rows.length) {
+      return { ok: true, conversation: result.rows[0] };
+    }
+
+    return { ok: false, code: "conversation_forbidden" };
+  }
+
+  if (roleId === MEDICO_ROLE_ID && medicoId) {
+    const result = await client.query(
+      `SELECT
+         conv.conversacionid::text AS conversacionid,
+         conv.citaid::text AS citaid,
+         conv.pacienteid::text AS pacienteid,
+         conv.medicoid::text AS medicoid
+       FROM conversaciones conv
+       WHERE conv.conversacionid::text = $1::text
+         AND conv.medicoid::text = $2::text
+       LIMIT 1`,
+      [cleanConversationId, medicoId]
+    );
+
+    if (result.rows.length) {
+      return { ok: true, conversation: result.rows[0] };
+    }
+
+    return { ok: false, code: "conversation_forbidden" };
+  }
+
+  return { ok: false, code: "role_not_allowed" };
+}
+
+async function joinAuthorizedCitaRoom(socket, citaId, callback) {
+  let client;
+  try {
+    client = await pool.connect();
+    const auth = getSocketAuth(socket);
+    const access = await canAccessCita(client, auth, citaId);
+
+    if (!access.ok) {
+      respondToSocketAction(callback, access);
+      return;
+    }
+
+    const cleanCitaId = normalizeText(access.cita?.citaid || citaId);
+    const room = toRoom("cita", cleanCitaId);
+    if (!room) {
+      respondToSocketAction(callback, { ok: false, code: "cita_id_invalid" });
+      return;
+    }
+
+    socket.join(room);
+    getSocketRealtimeScopes(socket).citas.add(cleanCitaId);
+    respondToSocketAction(callback, {
+      ok: true,
+      citaId: cleanCitaId,
+      room,
+    });
+  } catch (err) {
+    respondToSocketAction(callback, { ok: false, code: "server_error" });
+  } finally {
+    if (client) client.release();
+  }
+}
+
+async function joinAuthorizedConversationRoom(socket, conversationId, callback) {
+  let client;
+  try {
+    client = await pool.connect();
+    const auth = getSocketAuth(socket);
+    const access = await canAccessConversation(client, auth, conversationId);
+
+    if (!access.ok) {
+      respondToSocketAction(callback, access);
+      return;
+    }
+
+    const cleanConversationId = normalizeText(
+      access.conversation?.conversacionid || conversationId
+    );
+    const room = toRoom("conversation", cleanConversationId);
+    if (!room) {
+      respondToSocketAction(callback, { ok: false, code: "conversation_id_invalid" });
+      return;
+    }
+
+    socket.join(room);
+    getSocketRealtimeScopes(socket).conversations.add(cleanConversationId);
+    respondToSocketAction(callback, {
+      ok: true,
+      conversacionId: cleanConversationId,
+      citaId: normalizeText(access.conversation?.citaid),
+      room,
+    });
+  } catch (err) {
+    respondToSocketAction(callback, { ok: false, code: "server_error" });
+  } finally {
+    if (client) client.release();
   }
 }
 
@@ -203,10 +400,11 @@ function initializeSocketServer(httpServer) {
   });
 
   ioInstance.on("connection", (socket) => {
-    const auth = socket.data?.auth || {};
+    const auth = getSocketAuth(socket);
     const userId = normalizeText(auth.usuarioid);
     const pacienteId = normalizeText(auth.pacienteId);
     const medicoId = normalizeText(auth.medicoId);
+    const scopes = getSocketRealtimeScopes(socket);
 
     socket.join(toRoom("user", userId));
     if (pacienteId) socket.join(toRoom("paciente", pacienteId));
@@ -215,31 +413,38 @@ function initializeSocketServer(httpServer) {
       emitMedicoPresence({ medicoId, online: true });
     }
 
-    socket.on("join:cita", (citaId) => {
-      const room = toRoom("cita", citaId);
-      if (room) socket.join(room);
+    socket.on("join:cita", async (citaId, callback) => {
+      await joinAuthorizedCitaRoom(socket, citaId, callback);
     });
 
     socket.on("leave:cita", (citaId) => {
-      const room = toRoom("cita", citaId);
+      const cleanCitaId = normalizeText(citaId);
+      if (!scopes.citas.has(cleanCitaId)) return;
+      const room = toRoom("cita", cleanCitaId);
       if (room) socket.leave(room);
+      scopes.citas.delete(cleanCitaId);
     });
 
-    socket.on("join:conversation", (conversationId) => {
-      const room = toRoom("conversation", conversationId);
-      if (room) socket.join(room);
+    socket.on("join:conversation", async (conversationId, callback) => {
+      await joinAuthorizedConversationRoom(socket, conversationId, callback);
     });
 
     socket.on("leave:conversation", (conversationId) => {
-      const room = toRoom("conversation", conversationId);
+      const cleanConversationId = normalizeText(conversationId);
+      if (!scopes.conversations.has(cleanConversationId)) return;
+      const room = toRoom("conversation", cleanConversationId);
       if (room) socket.leave(room);
+      scopes.conversations.delete(cleanConversationId);
     });
 
     socket.on("typing", ({ conversacionId, isTyping }) => {
-      const room = toRoom("conversation", conversacionId);
+      const cleanConversationId = normalizeText(conversacionId);
+      if (!scopes.conversations.has(cleanConversationId)) return;
+
+      const room = toRoom("conversation", cleanConversationId);
       if (!room) return;
       socket.to(room).emit("typing", {
-        conversacionId: normalizeText(conversacionId),
+        conversacionId: cleanConversationId,
         usuarioid: userId,
         isTyping: Boolean(isTyping),
         at: new Date().toISOString(),
