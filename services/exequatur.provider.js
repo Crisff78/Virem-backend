@@ -1,5 +1,7 @@
 const axios = require("axios");
 const cheerio = require("cheerio");
+const fs = require("fs");
+const https = require("https");
 const { wrapper } = require("axios-cookiejar-support");
 const tough = require("tough-cookie");
 
@@ -22,10 +24,10 @@ const TLS_CERT_ERROR_CODES = new Set([
   "SELF_SIGNED_CERT_IN_CHAIN",
   "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
   "CERT_HAS_EXPIRED",
+  "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+  "ERR_TLS_CERT_ALTNAME_INVALID",
 ]);
 
-const ALLOW_INSECURE_TLS_FALLBACK =
-  String(process.env.SNS_ALLOW_INSECURE_TLS_FALLBACK || "true") !== "false";
 const SNS_TIMEOUT_MS = Math.max(
   3000,
   Number.parseInt(process.env.SNS_TIMEOUT_MS || "10000", 10) || 10000
@@ -42,15 +44,12 @@ const SNS_UNAVAILABLE_CACHE_MS = Math.max(
   0,
   Number.parseInt(process.env.SNS_UNAVAILABLE_CACHE_MS || "0", 10) || 0
 );
-const SNS_TLS_FALLBACK_CACHE_MS = Math.max(
-  5000,
-  Number.parseInt(process.env.SNS_TLS_FALLBACK_CACHE_MS || "1800000", 10) ||
-    1800000
-);
+const SNS_TLS_MIN_VERSION =
+  String(process.env.SNS_TLS_MIN_VERSION || "TLSv1.2").trim() || "TLSv1.2";
+const SNS_CA_CERT_PATH = String(process.env.SNS_CA_CERT_PATH || "").trim();
+const SNS_CA_CERT_PEM = String(process.env.SNS_CA_CERT_PEM || "").trim();
 
 let snsUnavailableUntil = 0;
-let forceInsecureTlsUntil = 0;
-let lastTlsWarningAt = 0;
 let lastUnavailableLogAt = 0;
 
 function nowMs() {
@@ -61,10 +60,72 @@ function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function createSnsConfigError(message, cause, code = "SNS_TLS_CONFIG_ERROR") {
+  const error = new Error(message);
+  error.code = code;
+  error.cause = cause || null;
+  error.isSnsConfigError = true;
+  return error;
+}
+
+function normalizePem(value) {
+  return String(value || "").replace(/\\n/g, "\n").trim();
+}
+
+function loadCustomCaCertificates() {
+  const certificates = [];
+
+  const pemInline = normalizePem(SNS_CA_CERT_PEM);
+  if (pemInline) {
+    certificates.push(pemInline);
+  }
+
+  if (SNS_CA_CERT_PATH) {
+    try {
+      const pemFromFile = fs.readFileSync(SNS_CA_CERT_PATH, "utf8").trim();
+      if (!pemFromFile) {
+        throw new Error("El archivo de CA esta vacio.");
+      }
+      certificates.push(pemFromFile);
+    } catch (error) {
+      throw createSnsConfigError(
+        `No se pudo leer SNS_CA_CERT_PATH (${SNS_CA_CERT_PATH}).`,
+        error,
+        "SNS_CA_CERT_LOAD_FAILED"
+      );
+    }
+  }
+
+  return certificates;
+}
+
+function buildHttpsAgent() {
+  const options = {
+    keepAlive: true,
+    minVersion: SNS_TLS_MIN_VERSION,
+    rejectUnauthorized: true,
+  };
+
+  const certificates = loadCustomCaCertificates();
+  if (certificates.length) {
+    options.ca = certificates;
+  }
+
+  try {
+    return new https.Agent(options);
+  } catch (error) {
+    throw createSnsConfigError(
+      "No se pudo construir el agente HTTPS seguro para el SNS.",
+      error
+    );
+  }
+}
+
 function buildClient() {
   return wrapper(
     axios.create({
       jar: new tough.CookieJar(),
+      httpsAgent: buildHttpsAgent(),
       withCredentials: true,
       timeout: SNS_TIMEOUT_MS,
       headers: {
@@ -83,35 +144,20 @@ function parseSnsError(error) {
   const status = Number(error?.response?.status || 0);
   const code = String(error?.code || "");
   const message = error?.message || "Error desconocido";
+  const configError = Boolean(error?.isSnsConfigError);
+  const tlsError = TLS_CERT_ERROR_CODES.has(code);
   const serviceUnavailable =
-    status >= 500 ||
-    TEMPORARY_NETWORK_CODES.has(code) ||
-    TLS_CERT_ERROR_CODES.has(code);
+    !configError &&
+    (status >= 500 || TEMPORARY_NETWORK_CODES.has(code) || tlsError);
 
   return {
     status: status || null,
     code: code || null,
     message,
+    configError,
+    tlsError,
     serviceUnavailable,
   };
-}
-
-function shouldUseInsecureTlsByCache() {
-  return ALLOW_INSECURE_TLS_FALLBACK && nowMs() < forceInsecureTlsUntil;
-}
-
-function openTlsFallbackWindow() {
-  const until = nowMs() + SNS_TLS_FALLBACK_CACHE_MS;
-  forceInsecureTlsUntil = Math.max(forceInsecureTlsUntil, until);
-}
-
-function warnTlsFallbackOnce(code) {
-  const now = nowMs();
-  if (now - lastTlsWarningAt < 30000) return;
-  lastTlsWarningAt = now;
-  console.warn(
-    `SNS TLS warning (${code}). Using insecure TLS fallback for exequatur provider.`
-  );
 }
 
 function logSnsUnavailableOnce(meta) {
@@ -121,19 +167,23 @@ function logSnsUnavailableOnce(meta) {
   console.error("Error SNS:", meta);
 }
 
-async function runWithInsecureTls(task) {
-  const previous = process.env.NODE_TLS_REJECT_UNAUTHORIZED;
-  process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
-
-  try {
-    return await task();
-  } finally {
-    if (typeof previous === "undefined") {
-      delete process.env.NODE_TLS_REJECT_UNAUTHORIZED;
-    } else {
-      process.env.NODE_TLS_REJECT_UNAUTHORIZED = previous;
-    }
+function buildSnsFailureReason(parsed) {
+  if (parsed.configError) {
+    return "La configuracion TLS del SNS es invalida. Revisa SNS_CA_CERT_PATH o SNS_CA_CERT_PEM.";
   }
+
+  if (parsed.tlsError) {
+    return (
+      "No se pudo establecer una conexion TLS segura con el SNS. " +
+      "Verifica la cadena de certificados del servicio o configura una CA valida con SNS_CA_CERT_PATH/SNS_CA_CERT_PEM."
+    );
+  }
+
+  if (parsed.serviceUnavailable) {
+    return TEMPORARY_UNAVAILABLE_REASON;
+  }
+
+  return "Error consultando SNS.";
 }
 
 async function consultarConCliente({ client, fullName }) {
@@ -218,55 +268,17 @@ async function consultarConCliente({ client, fullName }) {
   };
 }
 
-async function ejecutarConsultaSns({ fullName, insecureTls }) {
+async function ejecutarConsultaSns({ fullName }) {
   try {
-    const result = insecureTls
-      ? await runWithInsecureTls(() =>
-          consultarConCliente({ client: buildClient(), fullName })
-        )
-      : await consultarConCliente({ client: buildClient(), fullName });
-
-    if (insecureTls) {
-      return { ...result, tlsFallbackInsecure: true };
-    }
-
-    return result;
+    return await consultarConCliente({ client: buildClient(), fullName });
   } catch (error) {
     const parsed = parseSnsError(error);
-
-    if (
-      !insecureTls &&
-      ALLOW_INSECURE_TLS_FALLBACK &&
-      parsed.code &&
-      TLS_CERT_ERROR_CODES.has(parsed.code)
-    ) {
-      openTlsFallbackWindow();
-      warnTlsFallbackOnce(parsed.code);
-
-      try {
-        const fallbackResult = await runWithInsecureTls(() =>
-          consultarConCliente({ client: buildClient(), fullName })
-        );
-        return { ...fallbackResult, tlsFallbackInsecure: true };
-      } catch (fallbackError) {
-        const fallbackParsed = parseSnsError(fallbackError);
-        return {
-          ok: false,
-          serviceUnavailable: fallbackParsed.serviceUnavailable,
-          reason: fallbackParsed.serviceUnavailable
-            ? TEMPORARY_UNAVAILABLE_REASON
-            : "Error consultando SNS.",
-          _meta: fallbackParsed,
-        };
-      }
-    }
-
     return {
       ok: false,
       serviceUnavailable: parsed.serviceUnavailable,
-      reason: parsed.serviceUnavailable
-        ? TEMPORARY_UNAVAILABLE_REASON
-        : "Error consultando SNS.",
+      configError: parsed.configError,
+      tlsError: parsed.tlsError,
+      reason: buildSnsFailureReason(parsed),
       _meta: parsed,
     };
   }
@@ -290,21 +302,18 @@ async function consultarExequaturSNS({ nombreCompleto }) {
     };
   }
 
-  let useInsecureTls = shouldUseInsecureTlsByCache();
   let lastResult = null;
 
   for (let attempt = 1; attempt <= SNS_MAX_ATTEMPTS; attempt += 1) {
-    const result = await ejecutarConsultaSns({
-      fullName,
-      insecureTls: useInsecureTls,
-    });
+    const result = await ejecutarConsultaSns({ fullName });
 
-    if (result.tlsFallbackInsecure) {
-      useInsecureTls = true;
-      openTlsFallbackWindow();
-    }
-
-    if (result.ok || !result.serviceUnavailable || attempt === SNS_MAX_ATTEMPTS) {
+    if (
+      result.ok ||
+      !result.serviceUnavailable ||
+      result.configError ||
+      result.tlsError ||
+      attempt === SNS_MAX_ATTEMPTS
+    ) {
       if (!result.ok && result.serviceUnavailable) {
         if (SNS_UNAVAILABLE_CACHE_MS > 0) {
           snsUnavailableUntil = nowMs() + SNS_UNAVAILABLE_CACHE_MS;

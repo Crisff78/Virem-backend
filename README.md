@@ -28,6 +28,11 @@ Backend en Node.js + Express + PostgreSQL para autenticacion, agenda medica, cha
       - `GLOBAL_RATE_LIMIT_WINDOW_MS=60000`
       - `GLOBAL_RATE_LIMIT_MAX=180`
       - `MAX_JSON_BODY=1mb`
+   - Para validacion segura del SNS/Exequatur, si el sitio remoto usa una cadena TLS no confiable por tu runtime:
+      - `SNS_CA_CERT_PATH=/ruta/a/ca-sns.pem`
+      - o `SNS_CA_CERT_PEM="-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----"`
+      - `SNS_TLS_MIN_VERSION=TLSv1.2`
+      - Nota: el backend ya no admite fallback inseguro ni desactiva la verificacion TLS.
 3. Ejecutar migraciones:
    - `npm run migrate:agenda`
 
@@ -127,6 +132,7 @@ Eventos emitidos:
 ## Notas
 - Se evita doble reserva con validacion de backend y un indice unico parcial (`uq_cita_medico_inicio_activa`) cuando no existen conflictos previos.
 - `JITSI_BASE_URL` permite cambiar el proveedor base para salas Jitsi.
+- El provider del SNS valida TLS estrictamente. Si el servicio remoto requiere una CA adicional, debes configurarla con `SNS_CA_CERT_PATH` o `SNS_CA_CERT_PEM`.
 - El backend ahora valida configuracion critica al iniciar (`JWT_SECRET` y DB), aplica cabeceras de seguridad, rate limit global, CORS con allowlist y trazabilidad por `x-request-id`.
 
 ## Checklist de rollout seguro (produccion)

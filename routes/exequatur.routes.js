@@ -36,11 +36,13 @@ router.post("/validar-exequatur", limiter, async (req, res) => {
     console.log("[SNS] Consulta fallida:", {
       nombre,
       serviceUnavailable: Boolean(result.serviceUnavailable),
+      configError: Boolean(result.configError),
+      tlsError: Boolean(result.tlsError),
       reason: result.reason,
       fastFailCached: Boolean(result.fastFailCached),
     });
 
-    const statusCode = result.serviceUnavailable ? 503 : 400;
+    const statusCode = result.configError ? 500 : result.serviceUnavailable ? 503 : 400;
     return res.status(statusCode).json({
       success: false,
       serviceUnavailable: Boolean(result.serviceUnavailable),

@@ -24,20 +24,54 @@ function isCompletedCita(row) {
   );
 }
 
-async function hasPatientConsent(client, pacienteId) {
+async function getProfileMetaByProfileUserId(client, profileUserId) {
+  const cleanProfileUserId = String(profileUserId || "").trim();
+  if (!cleanProfileUserId) return null;
+
   const result = await client.query(
     `SELECT meta_json
      FROM usuario_perfil
      WHERE usuarioid::text = $1::text
      ORDER BY updated_at DESC
      LIMIT 1`,
-    [String(pacienteId)]
+    [cleanProfileUserId]
   );
 
-  if (!result.rows.length) return false;
+  if (!result.rows.length) return null;
   const meta = result.rows[0]?.meta_json;
-  if (!meta || typeof meta !== "object") return false;
-  return Boolean(meta.compartirHistorial);
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) return {};
+  return meta;
+}
+
+async function hasPatientConsent(client, pacienteId) {
+  const cleanPacienteId = Number.parseInt(String(pacienteId || ""), 10);
+  if (!Number.isFinite(cleanPacienteId) || cleanPacienteId <= 0) return false;
+
+  const pacienteResult = await client.query(
+    `SELECT pacienteid, usuarioid
+     FROM paciente
+     WHERE pacienteid = $1
+     LIMIT 1`,
+    [cleanPacienteId]
+  );
+
+  if (!pacienteResult.rows.length) return false;
+
+  const pacienteRow = pacienteResult.rows[0];
+  const usuarioId = Number.parseInt(String(pacienteRow?.usuarioid || ""), 10);
+
+  // Fuente canonica: el consentimiento vive en usuario_perfil.usuarioid = usuario.usuarioid.
+  if (Number.isFinite(usuarioId) && usuarioId > 0) {
+    const canonicalMeta = await getProfileMetaByProfileUserId(client, usuarioId);
+    if (canonicalMeta) {
+      return Boolean(canonicalMeta.compartirHistorial);
+    }
+  }
+
+  // Compatibilidad legacy: si no existe perfil canonico, intenta el identificador antiguo.
+  const legacyMeta = await getProfileMetaByProfileUserId(client, cleanPacienteId);
+  if (!legacyMeta) return false;
+  return Boolean(legacyMeta.compartirHistorial);
 }
 
 router.use(requireAuth);
