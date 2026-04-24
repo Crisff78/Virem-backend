@@ -1038,7 +1038,8 @@ function buildSlots(availabilityRows, bookedRows, { modalidadFilter, fechaFilter
 function canJoinVideoRoom({ citaStart, roomEstado, roleId }) {
   const start = parseDateInput(citaStart);
   if (!start) return false;
-  if (normalizeComparableText(roomEstado) === "finalizada") return false;
+  const normalizedRoomEstado = normalizeComparableText(roomEstado);
+  if (normalizedRoomEstado === "finalizada") return false;
 
   const now = Date.now();
   const startMs = start.getTime();
@@ -1046,6 +1047,9 @@ function canJoinVideoRoom({ citaStart, roomEstado, roleId }) {
   const postWindowMs = 6 * 60 * 60 * 1000;
 
   if (roleId === MEDICO_ROLE_ID) return now <= startMs + postWindowMs;
+  if (roleId === PACIENTE_ROLE_ID) {
+    return normalizedRoomEstado === "abierta" && now <= startMs + postWindowMs;
+  }
   return now >= startMs - preJoinWindowMs && now <= startMs + postWindowMs;
 }
 

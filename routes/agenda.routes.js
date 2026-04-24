@@ -1309,6 +1309,16 @@ router.post("/me/citas/:citaId/video-sala/abrir", requireAuth, async (req, res) 
     );
 
     const sala = updateSala.rows[0] || null;
+    const doctorCanJoin = canJoinVideoRoom({
+      citaStart: cita.fechahorainicio,
+      roomEstado: sala?.estado,
+      roleId: context.roleId,
+    });
+    const patientCanJoin = canJoinVideoRoom({
+      citaStart: cita.fechahorainicio,
+      roomEstado: sala?.estado,
+      roleId: PACIENTE_ROLE_ID,
+    });
     const conversacionId = await ensureConversation(client, {
       citaId,
       pacienteId: cita.pacienteid,
@@ -1338,6 +1348,7 @@ router.post("/me/citas/:citaId/video-sala/abrir", requireAuth, async (req, res) 
               videoSalaId: normalizeText(sala.videosalaid),
               estado: normalizeText(sala.estado),
               joinUrl: normalizeText(sala.token_o_url),
+              canJoin: patientCanJoin,
             }
           : null,
       },
@@ -1365,6 +1376,7 @@ router.post("/me/citas/:citaId/video-sala/abrir", requireAuth, async (req, res) 
             estado: normalizeText(sala.estado),
             openedAt: sala.opened_at || null,
             closedAt: sala.closed_at || null,
+            canJoin: doctorCanJoin,
           }
         : null,
     });
@@ -1499,6 +1511,7 @@ router.post("/me/citas/:citaId/video-sala/finalizar", requireAuth, async (req, r
               videoSalaId: normalizeText(sala.videosalaid),
               estado: normalizeText(sala.estado),
               joinUrl: normalizeText(sala.token_o_url),
+              canJoin: false,
             }
           : null,
       },
@@ -1527,6 +1540,7 @@ router.post("/me/citas/:citaId/video-sala/finalizar", requireAuth, async (req, r
             estado: normalizeText(sala.estado),
             openedAt: sala.opened_at || null,
             closedAt: sala.closed_at || null,
+            canJoin: false,
           }
         : null,
     });

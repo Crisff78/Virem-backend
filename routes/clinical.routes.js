@@ -12,6 +12,7 @@ const { ensureRfCoreSchema } = require("../services/rf-core");
 const { ensureUserProfileTable } = require("../services/user-profile.store");
 
 const router = express.Router();
+const ADMIN_ROLE_ID = 3;
 
 function isCompletedCita(row) {
   const statusCode = normalizeComparableText(row?.estado_codigo || "");
@@ -275,12 +276,17 @@ router.get("/me/historia", async (req, res) => {
         params.push(Number.parseInt(pacienteIdFilter, 10));
         where.push(`h.pacienteid = $${params.length}`);
       }
-    } else {
-      // Admin o rol distinto: lectura limitada.
+    } else if (context.roleId === ADMIN_ROLE_ID) {
+      // Admin: lectura limitada y opcionalmente filtrada.
       if (pacienteIdFilter) {
         params.push(Number.parseInt(pacienteIdFilter, 10));
         where.push(`h.pacienteid = $${params.length}`);
       }
+    } else {
+      return res.status(403).json({
+        success: false,
+        message: "No tienes permisos para consultar historia clinica.",
+      });
     }
 
     params.push(limit);
@@ -313,7 +319,7 @@ router.get("/me/historia", async (req, res) => {
       params
     );
 
-    const limitedAdmin = context.roleId !== PACIENTE_ROLE_ID && context.roleId !== MEDICO_ROLE_ID;
+    const limitedAdmin = context.roleId === ADMIN_ROLE_ID;
 
     return res.json({
       success: true,
