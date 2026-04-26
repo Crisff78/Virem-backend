@@ -892,7 +892,7 @@ async function fetchCitaByIdForContext(client, { citaId, context, lock = false }
     LEFT JOIN paciente p ON p.pacienteid = c.pacienteid
     WHERE ${conditions.join(" AND ")}
     LIMIT 1
-    ${lock ? "FOR UPDATE" : ""}`;
+    ${lock ? "FOR UPDATE OF c" : ""}`;
 
   const result = await client.query(sql, params);
   return result.rows[0] || null;

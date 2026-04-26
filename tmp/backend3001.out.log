@@ -1,0 +1,5 @@
+[dotenv@17.2.3] injecting env (11) from .env -- tip: 🔄 add secrets lifecycle management: https://dotenvx.com/ops
+[dotenv@17.2.3] injecting env (0) from .env -- tip: ⚙️  load multiple .env files with { path: ['.env.local', '.env'] }
+🚀 Backend corriendo en http://localhost:3001
+✅ Conectado a Supabase correctamente
+[ { now: 2026-04-26T03:34:10.728Z } ]

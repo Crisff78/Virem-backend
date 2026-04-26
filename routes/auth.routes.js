@@ -165,8 +165,16 @@ function getRecoveryTransporter() {
   return recoveryTransporterCache;
 }
 
+function isProductionEnv() {
+  return String(process.env.NODE_ENV || "").trim().toLowerCase() === "production";
+}
+
 function allowConsoleEmailFallback() {
-  return String(process.env.EMAIL_FALLBACK_TO_CONSOLE || "false") === "true";
+  const raw = String(process.env.EMAIL_FALLBACK_TO_CONSOLE || "").trim().toLowerCase();
+  if (!raw) {
+    return !isProductionEnv();
+  }
+  return raw === "true" || raw === "1" || raw === "yes" || raw === "on";
 }
 
 function trimTrailingSlash(url) {
@@ -224,13 +232,24 @@ async function sendRecoveryCodeEmail({ email, code }) {
     return { delivered: false, devCode: code };
   }
 
-  await transporter.sendMail({
-    from: fromEmail,
-    to: email,
-    subject: "Codigo de recuperacion - VIREM",
-    text: `Tu codigo de recuperacion es: ${code}. Expira en ${RECOVERY_CODE_TTL_MINUTES} minutos.`,
-    html: `<p>Tu codigo de recuperacion es:</p><p><strong style="font-size:20px;letter-spacing:2px;">${code}</strong></p><p>Expira en ${RECOVERY_CODE_TTL_MINUTES} minutos.</p>`,
-  });
+  try {
+    await transporter.sendMail({
+      from: fromEmail,
+      to: email,
+      subject: "Codigo de recuperacion - VIREM",
+      text: `Tu codigo de recuperacion es: ${code}. Expira en ${RECOVERY_CODE_TTL_MINUTES} minutos.`,
+      html: `<p>Tu codigo de recuperacion es:</p><p><strong style="font-size:20px;letter-spacing:2px;">${code}</strong></p><p>Expira en ${RECOVERY_CODE_TTL_MINUTES} minutos.</p>`,
+    });
+  } catch (error) {
+    if (!allowConsoleEmailFallback()) {
+      throw error;
+    }
+
+    console.warn(
+      `[RECOVERY] Fallback local para ${email}: ${code} (${error?.message || "sendMail failed"})`
+    );
+    return { delivered: false, devCode: code };
+  }
 
   return { delivered: true };
 }
@@ -256,20 +275,31 @@ async function sendEmailVerificationCodeEmail({ email, code }) {
     return { delivered: false, devCode: code };
   }
 
-  await transporter.sendMail({
-    from: fromEmail,
-    to: email,
-    subject: "Verifica tu correo - VIREM",
-    text:
-      `Tu codigo de verificacion es: ${code}. ` +
-      `Expira en ${EMAIL_CODE_TTL_MINUTES} minutos.\n\n` +
-      `Tambien puedes verificar haciendo clic aqui:\n${verificationLink}`,
-    html:
-      `<p>Tu codigo de verificacion es:</p>` +
-      `<p><strong style=\"font-size:20px;letter-spacing:2px;\">${code}</strong></p>` +
-      `<p>Expira en ${EMAIL_CODE_TTL_MINUTES} minutos.</p>` +
-      `<p><a href=\"${verificationLink}\">Haz clic aqui para verificar tu correo</a></p>`,
-  });
+  try {
+    await transporter.sendMail({
+      from: fromEmail,
+      to: email,
+      subject: "Verifica tu correo - VIREM",
+      text:
+        `Tu codigo de verificacion es: ${code}. ` +
+        `Expira en ${EMAIL_CODE_TTL_MINUTES} minutos.\n\n` +
+        `Tambien puedes verificar haciendo clic aqui:\n${verificationLink}`,
+      html:
+        `<p>Tu codigo de verificacion es:</p>` +
+        `<p><strong style=\"font-size:20px;letter-spacing:2px;\">${code}</strong></p>` +
+        `<p>Expira en ${EMAIL_CODE_TTL_MINUTES} minutos.</p>` +
+        `<p><a href=\"${verificationLink}\">Haz clic aqui para verificar tu correo</a></p>`,
+    });
+  } catch (error) {
+    if (!allowConsoleEmailFallback()) {
+      throw error;
+    }
+
+    console.warn(
+      `[VERIFY] Fallback local para ${email}: ${code} (${error?.message || "sendMail failed"})`
+    );
+    return { delivered: false, devCode: code };
+  }
 
   return { delivered: true };
 }
