@@ -119,6 +119,9 @@ function createApp() {
     const adminRoutes = require("./routes/admin.routes.js");
     app.use("/api/admin", adminRoutes);
 
+    const recetasRoutes = require('./routes/recetas.routes.js');
+    app.use('/api', recetasRoutes);
+
     app.use(notFoundHandler);
     app.use(errorHandler);
 

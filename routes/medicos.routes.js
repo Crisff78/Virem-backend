@@ -234,7 +234,7 @@ router.get("/", requireAuth, async (req, res) => {
            AND h.fechafin > NOW()
          GROUP BY h.medicoid::text
        )
-       SELECT
+       SELECT DISTINCT ON (COALESCE(NULLIF(m.cedula,''), m.medicoid::text))
          m.medicoid::text AS "medicoid",
          m.nombrecompleto AS "nombreCompleto",
          m.usuarioid,
@@ -250,7 +250,7 @@ router.get("/", requireAuth, async (req, res) => {
          COALESCE(rv.rating_promedio, 0) AS "ratingPromedio",
          COALESCE(rv.total_valoraciones, 0) AS "totalValoraciones",
          ns.proximo_horario AS "proximoHorarioDisponible",
-         mp.foto_url AS "fotoUrl",
+         COALESCE(mp.foto_url) AS "fotoUrl",
          m.fecharegistro
        FROM medico m
        LEFT JOIN especialidad e ON e.especialidadid = m.especialidadid
@@ -260,11 +260,13 @@ router.get("/", requireAuth, async (req, res) => {
           SELECT up.foto_url
           FROM usuario_perfil up
           WHERE up.usuarioid::text = m.usuarioid::text
+            AND up.foto_url IS NOT NULL
+            AND up.foto_url <> ''
           ORDER BY up.updated_at DESC
           LIMIT 1
         ) mp ON TRUE
        ${whereClause}
-       ORDER BY m.fecharegistro DESC, m.medicoid DESC`
+       ORDER BY COALESCE(NULLIF(m.cedula,''), m.medicoid::text), m.fecharegistro DESC, m.medicoid DESC`
       ,
       params
     );
@@ -371,6 +373,8 @@ router.get("/:id", requireAuth, async (req, res) => {
           SELECT up.foto_url
           FROM usuario_perfil up
           WHERE up.usuarioid::text = m.usuarioid::text
+            AND up.foto_url IS NOT NULL
+            AND up.foto_url <> ''
           ORDER BY up.updated_at DESC
           LIMIT 1
         ) mp ON TRUE
