@@ -161,6 +161,10 @@ function sanitizeMedicoForAudience(row, actor, options = {}) {
     fotoUrl: isSupportedImageUri(row?.fotoUrl || null)
       ? String(row?.fotoUrl || "").trim() || null
       : null,
+    precio: Number(row?.precio || 0),
+    tipoPlan: String(row?.tipo_plan || 'comision'),
+    comisionPorcentaje: Number(row?.comision_porcentaje || 10),
+    membresiaActiva: Boolean(row?.membresia_activa),
     fecharegistro: row?.fecharegistro || null,
   };
 }
@@ -251,6 +255,7 @@ router.get("/", requireAuth, async (req, res) => {
          COALESCE(rv.total_valoraciones, 0) AS "totalValoraciones",
          ns.proximo_horario AS "proximoHorarioDisponible",
          COALESCE(mp.foto_url) AS "fotoUrl",
+         m.precio,
          m.fecharegistro
        FROM medico m
        LEFT JOIN especialidad e ON e.especialidadid = m.especialidadid
@@ -364,6 +369,7 @@ router.get("/:id", requireAuth, async (req, res) => {
          COALESCE(rv.total_valoraciones, 0) AS "totalValoraciones",
          ns.proximo_horario AS "proximoHorarioDisponible",
          mp.foto_url AS "fotoUrl",
+         m.precio,
          m.fecharegistro
        FROM medico m
        LEFT JOIN especialidad e ON e.especialidadid = m.especialidadid

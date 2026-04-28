@@ -689,6 +689,7 @@ router.patch("/medico/me/disponibilidades/:id/bloquear", requireAuth, async (req
 
 router.post("/medico/me/disponibilidades/recurrente", requireAuth, async (req, res) => {
   const { pattern, modalidad, slotMinutos, daysCount = 30 } = req.body;
+  console.log("[RECURRENTE] Generando con patron:", JSON.stringify(pattern));
   
   if (!Array.isArray(pattern) || pattern.length === 0) {
     return res.status(400).json({ success: false, message: "Debe enviar un patron de horarios valido." });
@@ -707,6 +708,17 @@ router.post("/medico/me/disponibilidades/recurrente", requireAuth, async (req, r
 
     const medicoId = String(context.medico.medicoid);
 
+    // CLEANUP: Delete unbooked slots for the next 30 days to prevent duplicates (the "8:00 loop")
+    // We only delete slots that don't have a related appointment (cita)
+    await client.query(
+      `DELETE FROM horario_disponible 
+       WHERE medicoid::text = $1::text 
+         AND fechainicio >= NOW() 
+         AND fechainicio <= NOW() + INTERVAL '31 days'
+         AND horariodisponibleid NOT IN (SELECT horariodisponibleid FROM cita WHERE horariodisponibleid IS NOT NULL)`,
+      [medicoId]
+    );
+
     // Save the pattern for future use
     await client.query(
       `INSERT INTO medico_horario_recurrente (medicoid, pattern, modalidad, slot_minutos, updated_at)
@@ -719,6 +731,10 @@ router.post("/medico/me/disponibilidades/recurrente", requireAuth, async (req, r
     const especialidadRow = await resolveEspecialidad(client, {
       medicoId: context.medico.medicoid,
     });
+    
+    // Safety check: if no specialty found, we use a fallback or return error
+    const especialidadId = especialidadRow ? Number(especialidadRow.especialidadid) : null;
+    
     const zonaHorariaId = await resolveZonaHorariaId(client);
     
     const slotsCreated = [];
@@ -753,7 +769,7 @@ router.post("/medico/me/disponibilidades/recurrente", requireAuth, async (req, r
               zonaHorariaId,
               start.toISOString(),
               end.toISOString(),
-              Number(especialidadRow.especialidadid),
+              especialidadId, // Can be null if not found
               normalizeModalidad(modalidad || dayConfig.modalidad, "ambas"),
               clampInt(slotMinutos || dayConfig.slotMinutos, 15, 60, 30)
             ]
@@ -768,7 +784,11 @@ router.post("/medico/me/disponibilidades/recurrente", requireAuth, async (req, r
   } catch (err) {
     if (client) await client.query("ROLLBACK");
     console.error("Error POST /agenda/medico/me/disponibilidades/recurrente:", err);
-    return res.status(500).json({ success: false, message: "Error generando disponibilidad recurrente." });
+    return res.status(500).json({ 
+      success: false, 
+      message: "Error generando disponibilidad recurrente.",
+      error: err.message 
+    });
   } finally {
     if (client) client.release();
   }
