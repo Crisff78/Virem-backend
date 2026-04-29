@@ -1112,4 +1112,143 @@ router.patch("/valoraciones/:valoracionId/moderar", async (req, res) => {
   }
 });
 
+// ===============================
+// GET /api/admin/presupuesto
+// Presupuesto e ingresos estimados mensuales
+// ===============================
+router.get("/presupuesto", async (req, res) => {
+  let client;
+  try {
+    client = await pool.connect();
+
+    const admin = await requireAdminContext(client, req.user);
+    if (!admin.ok) {
+      return res.status(admin.status).json({ success: false, message: admin.message });
+    }
+
+    const currentMonth = new Date();
+    const monthStart = new Date(currentMonth.getFullYear(), currentMonth.getMonth(), 1);
+    const monthEnd = new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1, 0);
+
+    // Calculate current month and previous month for comparison
+    const prevMonth = new Date(currentMonth.getFullYear(), currentMonth.getMonth() - 1, 1);
+    const prevMonthEnd = new Date(currentMonth.getFullYear(), currentMonth.getMonth(), 0);
+
+    const [
+      ingresosMes,
+      ingresosMesAnterior,
+      citasMes,
+      citasPagadas,
+      medicos,
+      suscripciones,
+    ] = await Promise.all([
+      // Ingresos este mes (comisiones por citas pagadas)
+      client.query(
+        `SELECT 
+           COUNT(*)::int AS total_citas,
+           COALESCE(SUM(monto_plataforma), 0)::numeric(14,2) AS comision_total,
+           COALESCE(SUM(monto_medico), 0)::numeric(14,2) AS monto_medicos,
+           COALESCE(SUM(precio), 0)::numeric(14,2) AS monto_total
+         FROM cita
+         WHERE DATE_TRUNC('month', fechahorainicio) = DATE_TRUNC('month', $1)
+           AND estado_codigo IN ('completada', 'confirmada')
+           AND precio > 0`,
+        [monthStart]
+      ),
+      // Ingresos mes anterior
+      client.query(
+        `SELECT 
+           COUNT(*)::int AS total_citas,
+           COALESCE(SUM(monto_plataforma), 0)::numeric(14,2) AS comision_total,
+           COALESCE(SUM(monto_medico), 0)::numeric(14,2) AS monto_medicos,
+           COALESCE(SUM(precio), 0)::numeric(14,2) AS monto_total
+         FROM cita
+         WHERE DATE_TRUNC('month', fechahorainicio) = DATE_TRUNC('month', $1)
+           AND estado_codigo IN ('completada', 'confirmada')
+           AND precio > 0`,
+        [prevMonth]
+      ),
+      // Total de citas este mes
+      client.query(
+        `SELECT COUNT(*)::int AS total FROM cita 
+         WHERE DATE_TRUNC('month', fechahorainicio) = DATE_TRUNC('month', $1)`,
+        [monthStart]
+      ),
+      // Citas pagadas este mes
+      client.query(
+        `SELECT COUNT(*)::int AS total FROM cita 
+         WHERE DATE_TRUNC('month', fechahorainicio) = DATE_TRUNC('month', $1)
+           AND precio > 0`,
+        [monthStart]
+      ),
+      // Número de médicos activos
+      client.query(
+        `SELECT COUNT(*)::int AS total FROM medico m
+         JOIN usuario u ON u.usuarioid = m.usuarioid
+         WHERE u.activo = TRUE AND u.account_status = 'activo'`
+      ),
+      // Suscripciones (médicos con membresía activa)
+      client.query(
+        `SELECT COUNT(*)::int AS total FROM medico
+         WHERE membresia_activa = TRUE`
+      ),
+    ]);
+
+    const citasEste = ingresosMes.rows[0] || {};
+    const citasAnterior = ingresosMesAnterior.rows[0] || {};
+    
+    const comisionEsteMes = toMoney(citasEste.comision_total || 0);
+    const comisionMesAnterior = toMoney(citasAnterior.comision_total || 0);
+    const variacion = comisionMesAnterior > 0 
+      ? ((comisionEsteMes - comisionMesAnterior) / comisionMesAnterior * 100).toFixed(1)
+      : 0;
+
+    // Presupuesto estimado según la imagen: $2,300.00 (1000 suscripciones + 1000 comisión + 300 farmacéuticos)
+    // Pero calculamos realmente basado en datos reales
+    const medicoActivos = toInt(medicos.rows[0]?.total || 0);
+    const medicirosConMembresia = toInt(suscripciones.rows[0]?.total || 0);
+    
+    // Estimaciones conservadoras
+    const ingresoSuscripciones = medicirosConMembresia * 1000; // $1,000 por médico con membresía
+    const ingresoComisiones = toMoney(citasEste.comision_total || 0);
+    const ingresoFarmaceutico = toMoney(citasEste.total_citas || 0) * 10; // $10 estimado por consulta
+    
+    const totalIngresos = toMoney(ingresoSuscripciones + ingresoComisiones + ingresoFarmaceutico);
+
+    return res.json({
+      success: true,
+      presupuesto: {
+        periodo: {
+          mes: currentMonth.toLocaleString('es-ES', { month: 'long', year: 'numeric' }),
+          inicio: monthStart.toISOString().split('T')[0],
+          fin: monthEnd.toISOString().split('T')[0],
+        },
+        ingresosMes: {
+          suscripciones: toMoney(ingresoSuscripciones),
+          comisiones: ingresoComisiones,
+          serviciosFarmaceuticos: toMoney(ingresoFarmaceutico),
+          total: totalIngresos,
+        },
+        ingresosMesAnterior: toMoney(citasAnterior.comision_total || 0),
+        variacionPorcentaje: parseFloat(variacion),
+        estadisticas: {
+          citasTotales: toInt(citasMes.rows[0]?.total || 0),
+          citasPagadas: toInt(citasPagadas.rows[0]?.total || 0),
+          medicoActivos,
+          medicos ConMembresia: medicirosConMembresia,
+          montoMedicosMes: toMoney(citasEste.monto_medicos || 0),
+        },
+      },
+    });
+  } catch (err) {
+    console.error("Error en presupuesto:", err);
+    return res.status(500).json({
+      success: false,
+      message: "No se pudo calcular el presupuesto.",
+    });
+  } finally {
+    if (client) client.release();
+  }
+});
+
 module.exports = router;
