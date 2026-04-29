@@ -1,4 +1,4 @@
-﻿const { createHmac, randomInt, randomUUID } = require("crypto");
+const { createHmac, randomInt, randomUUID } = require("crypto");
 const pool = require("../config/db");
 
 const ACCOUNT_STATUS = {
@@ -146,6 +146,24 @@ async function ensureRfCoreSchema() {
     await pool.query(
       `CREATE INDEX IF NOT EXISTS idx_usuario_account_status
        ON usuario (account_status, rolid, activo)`
+    );
+
+    await pool.query(
+      `CREATE TABLE IF NOT EXISTS pending_registration (
+        id BIGSERIAL PRIMARY KEY,
+        email TEXT NOT NULL UNIQUE,
+        registration_data JSONB NOT NULL,
+        role_id INTEGER NOT NULL,
+        verification_code_hash TEXT NOT NULL,
+        expires_at TIMESTAMPTZ NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`
+    );
+
+    await pool.query(
+      `CREATE INDEX IF NOT EXISTS idx_pending_registration_email_expires
+       ON pending_registration (email, expires_at)`
     );
 
     await pool.query(
@@ -567,6 +585,105 @@ async function createEmailVerificationCode(
   };
 }
 
+async function createPendingRegistration(
+  dbClient,
+  { email, registrationData, roleId, ttlMinutes = EMAIL_CODE_TTL_MINUTES }
+) {
+  const db = resolveDb(dbClient);
+  await ensureRfCoreSchema();
+
+  const normalizedEmail = normalizeText(email).toLowerCase();
+  const code = generateEmailVerificationCode();
+  const codeHash = hashEmailVerificationCode(normalizedEmail, code);
+
+  // Limpiar anteriores para este correo
+  await db.query("DELETE FROM pending_registration WHERE email = $1", [
+    normalizedEmail,
+  ]);
+
+  await db.query(
+    `INSERT INTO pending_registration (
+      email,
+      registration_data,
+      role_id,
+      verification_code_hash,
+      expires_at
+    )
+    VALUES ($1, $2, $3, $4, NOW() + ($5 * INTERVAL '1 minute'))`,
+    [
+      normalizedEmail,
+      JSON.stringify(registrationData),
+      Number(roleId),
+      codeHash,
+      Number(ttlMinutes),
+    ]
+  );
+
+  return {
+    codigo: code,
+    ttlMinutes: Number(ttlMinutes),
+  };
+}
+
+async function verifyPendingRegistration(dbClient, { email, codigo }) {
+  const db = resolveDb(dbClient);
+  await ensureRfCoreSchema();
+
+  const normalizedEmail = normalizeText(email).toLowerCase();
+  const cleanCode = normalizeText(codigo);
+
+  const res = await db.query(
+    `SELECT * FROM pending_registration
+     WHERE email = $1
+     ORDER BY created_at DESC
+     LIMIT 1
+     FOR UPDATE`,
+    [normalizedEmail]
+  );
+
+  if (!res.rows.length) {
+    return { ok: false, code: "NOT_FOUND", message: "Registro no encontrado." };
+  }
+
+  const row = res.rows[0];
+  const expiresAtMs = new Date(row.expires_at).getTime();
+
+  if (expiresAtMs < Date.now()) {
+    await db.query("DELETE FROM pending_registration WHERE id = $1", [row.id]);
+    return { ok: false, code: "EXPIRED", message: "El código ha expirado." };
+  }
+
+  if (Number(row.attempts) >= EMAIL_CODE_MAX_ATTEMPTS) {
+    return {
+      ok: false,
+      code: "MAX_ATTEMPTS",
+      message: "Demasiados intentos. Regístrate de nuevo.",
+    };
+  }
+
+  const expectedHash = hashEmailVerificationCode(normalizedEmail, cleanCode);
+  if (expectedHash !== row.verification_code_hash) {
+    await db.query(
+      "UPDATE pending_registration SET attempts = attempts + 1 WHERE id = $1",
+      [row.id]
+    );
+    return { ok: false, code: "INCORRECT", message: "Código incorrecto." };
+  }
+
+  return {
+    ok: true,
+    email: normalizedEmail,
+    roleId: Number(row.role_id),
+    registrationData: row.registration_data,
+    pendingId: row.id,
+  };
+}
+
+async function deletePendingRegistration(dbClient, id) {
+  const db = resolveDb(dbClient);
+  await db.query("DELETE FROM pending_registration WHERE id = $1", [id]);
+}
+
 async function verifyEmailVerificationCode(dbClient, { email, codigo }) {
   const db = resolveDb(dbClient);
   await ensureRfCoreSchema();
@@ -656,6 +773,13 @@ async function verifyEmailVerificationCode(dbClient, { email, codigo }) {
     [row.id]
   );
 
+  const userRoleRes = await db.query('SELECT rolid FROM usuario WHERE usuarioid = $1', [Number(row.usuarioid)]);
+  const userRoleId = Number(userRoleRes.rows[0]?.rolid || 0);
+
+  const nextStatus = (userRoleId === 2) 
+    ? ACCOUNT_STATUS.PENDING_APPROVAL 
+    : ACCOUNT_STATUS.ACTIVE;
+
   await db.query(
     `UPDATE usuario
      SET email_verificado = TRUE,
@@ -666,7 +790,7 @@ async function verifyEmailVerificationCode(dbClient, { email, codigo }) {
          END,
          activo = TRUE
      WHERE usuarioid = $3`,
-    [ACCOUNT_STATUS.PENDING_VERIFICATION, ACCOUNT_STATUS.ACTIVE, Number(row.usuarioid)]
+    [ACCOUNT_STATUS.PENDING_VERIFICATION, nextStatus, Number(row.usuarioid)]
   );
 
   return {

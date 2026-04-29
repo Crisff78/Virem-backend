@@ -276,19 +276,59 @@ async function sendEmailVerificationCodeEmail({ email, code }) {
   }
 
   try {
+    const htmlContent = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <style>
+          .container { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: 0 auto; padding: 40px; background-color: #f6fafd; border-radius: 24px; }
+          .white-box { background-color: #ffffff; padding: 40px; border-radius: 20px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); }
+          .logo { text-align: center; margin-bottom: 30px; }
+          .logo-text { font-size: 28px; font-weight: 800; color: #137fec; letter-spacing: 2px; }
+          .title { font-size: 24px; font-weight: 700; color: #0a1931; margin-bottom: 10px; text-align: center; }
+          .subtitle { font-size: 16px; color: #4a7fa7; margin-bottom: 30px; text-align: center; line-height: 1.5; }
+          .code-box { background-color: #f1f7ff; padding: 20px; border-radius: 16px; text-align: center; margin-bottom: 30px; border: 1px dashed #137fec; }
+          .code { font-size: 36px; font-weight: 800; color: #137fec; letter-spacing: 8px; margin: 0; }
+          .footer { font-size: 12px; color: #94a3b8; text-align: center; margin-top: 30px; }
+          .btn { display: inline-block; padding: 14px 28px; background-color: #137fec; color: #ffffff !important; text-decoration: none; border-radius: 12px; font-weight: 700; margin-top: 10px; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="logo">
+            <span class="logo-text">VIREM</span>
+          </div>
+          <div class="white-box">
+            <h1 class="title">Verifica tu correo</h1>
+            <p class="subtitle">¡Gracias por unirte a VIREM! Para completar tu registro, introduce el siguiente código en la aplicación:</p>
+            
+            <div class="code-box">
+              <h2 class="code">${code}</h2>
+            </div>
+            
+            <p class="subtitle" style="margin-bottom: 10px;">Este código expirará en ${EMAIL_CODE_TTL_MINUTES} minutos.</p>
+            
+            <div style="text-align: center; margin-top: 20px;">
+              <p style="font-size: 14px; color: #64748b;">Si prefieres, también puedes verificar haciendo clic aquí:</p>
+              <a href="${verificationLink}" class="btn">Verificar ahora</a>
+            </div>
+          </div>
+          <div class="footer">
+            &copy; 2026 VIREM - Plataforma Médica Integral.<br>
+            Si no solicitaste este código, puedes ignorar este correo.
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+
     await transporter.sendMail({
       from: fromEmail,
       to: email,
-      subject: "Verifica tu correo - VIREM",
-      text:
-        `Tu codigo de verificacion es: ${code}. ` +
-        `Expira en ${EMAIL_CODE_TTL_MINUTES} minutos.\n\n` +
-        `Tambien puedes verificar haciendo clic aqui:\n${verificationLink}`,
-      html:
-        `<p>Tu codigo de verificacion es:</p>` +
-        `<p><strong style=\"font-size:20px;letter-spacing:2px;\">${code}</strong></p>` +
-        `<p>Expira en ${EMAIL_CODE_TTL_MINUTES} minutos.</p>` +
-        `<p><a href=\"${verificationLink}\">Haz clic aqui para verificar tu correo</a></p>`,
+      subject: `Verifica tu cuenta en VIREM [${code}]`,
+      text: `Tu código de verificación de VIREM es: ${code}. Expira en ${EMAIL_CODE_TTL_MINUTES} minutos.`,
+      html: htmlContent,
     });
   } catch (error) {
     if (!allowConsoleEmailFallback()) {
@@ -871,165 +911,44 @@ async function buildAuthUserPayload(client, userRow) {
  * ===============================
  */
 router.post("/register", async (req, res) => {
-  const {
-    nombres,
-    apellidos,
-    fechanacimiento,
-    genero,
-    cedula,
-    telefono,
-    email,
-    password,
-  } = req.body;
-
-  if (
-    !nombres ||
-    !apellidos ||
-    !fechanacimiento ||
-    !genero ||
-    !cedula ||
-    !telefono ||
-    !email ||
-    !password
-  ) {
-    return res.status(400).json({
-      success: false,
-      message:
-        "Faltan campos obligatorios (nombres, apellidos, fechanacimiento, genero, cedula, telefono, email, password).",
-    });
-  }
-
-  const normalizedEmail = String(email || "")
-    .toLowerCase()
-    .trim();
-  if (!isValidEmail(normalizedEmail)) {
-    return res.status(400).json({
-      success: false,
-      message: "Debes enviar un correo valido.",
-    });
-  }
-  if (!isStrongPassword(password)) {
-    return res.status(400).json({
-      success: false,
-      message:
-        "La contrasena debe tener al menos 8 caracteres, mayuscula, minuscula, numero y simbolo.",
-    });
-  }
-
-  const requireEmailVerification =
-    String(process.env.REQUIRE_EMAIL_VERIFICATION || "true") === "true";
+  const { nombres, apellidos, fechanacimiento, genero, cedula, telefono, email, password } = req.body;
+  const normalizedEmail = String(email || "").toLowerCase().trim();
 
   const client = await pool.connect();
-  let verificationCodePayload = null;
-
   try {
-    await ensureRfCoreSchema();
-    const fechaSQL = toSqlDate(fechanacimiento);
-
     await client.query("BEGIN");
-
-    const existing = await client.query(
-      "SELECT usuarioid FROM usuario WHERE email = $1",
-      [normalizedEmail]
-    );
-
+    const existing = await client.query("SELECT usuarioid FROM usuario WHERE email = $1", [normalizedEmail]);
     if (existing.rows.length > 0) {
       await client.query("ROLLBACK");
-      return res.status(409).json({
-        success: false,
-        message: "Ese correo ya esta registrado.",
-      });
+      return res.status(409).json({ success: false, message: "Este correo ya está registrado." });
     }
 
-    const passwordhash = await bcrypt.hash(String(password), 10);
-    const rolid = Number(process.env.DEFAULT_ROLID || PACIENTE_ROLE_ID);
-    const activo = String(process.env.DEFAULT_ACTIVO || "true") === "true";
-    const accountStatus = requireEmailVerification
-      ? ACCOUNT_STATUS.PENDING_VERIFICATION
-      : ACCOUNT_STATUS.ACTIVE;
-    const emailVerificado = !requireEmailVerification;
-
-    const insertUsuario = await client.query(
-      `INSERT INTO usuario (
-         rolid,
-         email,
-         passwordhash,
-         fechacreacion,
-         activo,
-         account_status,
-         email_verificado,
-         email_verificado_at
-       )
-       VALUES ($1,$2,$3,NOW(),$4,$5,$6,CASE WHEN $6 THEN NOW() ELSE NULL END)
-       RETURNING usuarioid`,
-      [
-        rolid,
-        normalizedEmail,
-        passwordhash,
-        activo,
-        accountStatus,
-        emailVerificado,
-      ]
-    );
-
-    const usuarioid = insertUsuario.rows[0].usuarioid;
-
-    const insertPaciente = await insertPacienteCompatible({
-      client,
-      usuarioid,
-      nombres,
-      apellidos,
-      fechaSQL,
-      genero,
-      cedulaClean: String(cedula).replace(/\D/g, "").slice(0, 11),
-      telefonoClean: String(telefono).replace(/\D/g, "").slice(0, 11),
+    const bodyCompleto = { nombres, apellidos, fechanacimiento, genero, cedula, telefono, password };
+    const verification = await createPendingRegistration(client, {
+      email: normalizedEmail,
+      registrationData: bodyCompleto,
+      roleId: PACIENTE_ROLE_ID,
     });
-
-    if (requireEmailVerification) {
-      verificationCodePayload = await createEmailVerificationCode(client, {
-        usuarioid,
-        email: normalizedEmail,
-        ttlMinutes: EMAIL_CODE_TTL_MINUTES,
-      });
-    }
 
     await client.query("COMMIT");
+    const delivery = await sendEmailVerificationCodeEmail({ email: normalizedEmail, code: verification.codigo });
 
-    let verificationDelivery = null;
-    if (verificationCodePayload) {
-      verificationDelivery = await sendEmailVerificationCodeEmail({
-        email: normalizedEmail,
-        code: verificationCodePayload.codigo,
-      });
-    }
-
-    return res.json({
+    return res.status(200).json({
       success: true,
-      message: requireEmailVerification
-        ? "Paciente registrado. Debes verificar tu correo para activar la cuenta."
-        : "Paciente registrado correctamente.",
-      pacienteid: insertPaciente?.pacienteid ?? null,
-      usuarioid,
-      accountStatus,
-      requiresEmailVerification: requireEmailVerification,
-      ...(verificationDelivery?.devCode
-        ? { devVerificationCode: verificationDelivery.devCode }
-        : {}),
+      message: "Código enviado. Verifícalo para completar tu registro.",
+      requiresEmailVerification: true,
+      ...(delivery?.devCode ? { devVerificationCode: delivery.devCode } : {}),
     });
   } catch (err) {
-    try {
-      await client.query("ROLLBACK");
-    } catch (_) {}
-
-    return res.status(500).json({
-      success: false,
-      message: "Error interno registrando paciente.",
-      error: err?.message || String(err),
-    });
+    if (client) await client.query("ROLLBACK");
+    console.error("Error in register-intent:", err);
+    return res.status(500).json({ success: false, message: "Error interno registrando paciente." });
   } finally {
-    client.release();
+    if (client) client.release();
   }
 });
+
+
 
 /**
  * ===============================
@@ -1038,289 +957,115 @@ router.post("/register", async (req, res) => {
  * ===============================
  */
 router.post("/register-medico", async (req, res) => {
-  const {
-    nombreCompleto,
-    fechanacimiento,
-    genero,
-    especialidad,
-    cedula,
-    telefono,
-    fotoUrl,
-    email,
-    password,
-    exequaturValidationToken,
-    documentos,
-  } = req.body;
+  const { nombreCompleto, fechanacimiento, genero, especialidad, cedula, telefono, fotoUrl, email, password, documentos, exequaturValidationToken } = req.body;
+  const normalizedEmail = String(email || "").toLowerCase().trim();
 
-  if (
-    !nombreCompleto ||
-    !fechanacimiento ||
-    !genero ||
-    !especialidad ||
-    !cedula ||
-    !telefono ||
-    !email ||
-    !password
-  ) {
-    return res.status(400).json({
-      success: false,
-      message:
-        "Faltan campos obligatorios (nombreCompleto, fechanacimiento, genero, especialidad, cedula, telefono, email, password).",
-    });
-  }
-
-  const normalizedEmail = String(email || "")
-    .toLowerCase()
-    .trim();
-  if (!isValidEmail(normalizedEmail)) {
-    return res.status(400).json({
-      success: false,
-      message: "Debes enviar un correo valido.",
-    });
-  }
-  if (!isStrongPassword(password)) {
-    return res.status(400).json({
-      success: false,
-      message:
-        "La contrasena debe tener al menos 8 caracteres, mayuscula, minuscula, numero y simbolo.",
-    });
-  }
-
-  const requireDoctorDocuments =
-    String(process.env.REQUIRE_DOCTOR_DOCUMENTS || "true") === "true";
-  const docsRaw = documentos && typeof documentos === "object" ? documentos : {};
-  const cedulaProfesionalUrl = String(
-    docsRaw.cedulaProfesionalUrl || docsRaw.cedulaUrl || ""
-  ).trim();
-  const certificadoEspecialidadUrl = String(
-    docsRaw.certificadoEspecialidadUrl ||
-      docsRaw.especialidadUrl ||
-      docsRaw.tituloEspecialidadUrl ||
-      ""
-  ).trim();
-
-  if (
-    requireDoctorDocuments &&
-    (!cedulaProfesionalUrl || !certificadoEspecialidadUrl)
-  ) {
-    return res.status(400).json({
-      success: false,
-      message:
-        "Debes subir cedula profesional y documento de especialidad para continuar.",
-    });
-  }
-
-  const allDocumentUrls = [cedulaProfesionalUrl, certificadoEspecialidadUrl].filter(
-    Boolean
-  );
-  const invalidDocument = allDocumentUrls.find((url) => {
-    if (url.length > MAX_PHOTO_URL_LENGTH) return true;
-    return !isSupportedImageUri(url);
-  });
-  if (invalidDocument) {
-    return res.status(400).json({
-      success: false,
-      message:
-        "Los documentos deben ser URLs/URIs de imagen validas (http/https/file/data:image).",
-    });
-  }
-
-  let client;
-
+  const client = await pool.connect();
   try {
-    await ensureRfCoreSchema();
-    const fechaSQL = toSqlDate(fechanacimiento);
-    const nombreCompletoTrim = String(nombreCompleto).replace(/\s+/g, " ").trim();
-    const cedulaClean = String(cedula).replace(/\D/g, "").slice(0, 11);
-    const telefonoClean = normalizePhone(telefono);
-    const especialidadTrim = String(especialidad).trim();
-    const fotoUrlTrim = String(fotoUrl || "").trim();
-
-    if (fotoUrlTrim.length > MAX_PHOTO_URL_LENGTH) {
-      return res.status(400).json({
-        success: false,
-        message: `fotoUrl supera ${MAX_PHOTO_URL_LENGTH} caracteres.`,
-      });
-    }
-
-    if (!isSupportedImageUri(fotoUrlTrim || null)) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "fotoUrl debe iniciar con http://, https://, file:// o data:image/.",
-      });
-    }
-
-    const tokenRaw = String(exequaturValidationToken || "").trim();
-    let exequaturValidatedByToken = false;
-
-    if (tokenRaw && process.env.JWT_SECRET) {
-      try {
-        const payload = jwt.verify(tokenRaw, process.env.JWT_SECRET);
-        const tokenScope = String(payload?.scope || "");
-        const tokenExists = Boolean(payload?.exists);
-        const tokenName = String(payload?.nombreCompleto || "")
-          .replace(/\s+/g, " ")
-          .trim();
-
-        if (
-          tokenScope === "exequatur-validation" &&
-          tokenExists &&
-          tokenName &&
-          tokenName.localeCompare(nombreCompletoTrim, "es", { sensitivity: "base" }) === 0
-        ) {
-          exequaturValidatedByToken = true;
-        }
-      } catch (_) {}
-    }
-
-    let exequaturResult = { ok: true, exists: true };
-    if (!exequaturValidatedByToken) {
-      exequaturResult = await consultarExequaturSNS({
-        nombreCompleto: nombreCompletoTrim,
-      });
-    }
-
-    if (!exequaturResult.ok) {
-      const statusCode = exequaturResult.serviceUnavailable ? 503 : 400;
-      return res.status(statusCode).json({
-        success: false,
-        serviceUnavailable: Boolean(exequaturResult.serviceUnavailable),
-        message:
-          exequaturResult.reason ||
-          "No se pudo validar el Exequatur del SNS. Intenta nuevamente.",
-      });
-    }
-
-    if (!exequaturResult.exists) {
-      const suggestedName = String(exequaturResult?.match?.candidateName || "").trim();
-      const suggestedMessage = suggestedName
-        ? ` Nombre similar encontrado: ${suggestedName}.`
-        : "";
-
-      return res.status(400).json({
-        success: false,
-        message: `El nombre del medico no aparece en el Exequatur del SNS.${suggestedMessage}`,
-      });
-    }
-
-    client = await pool.connect();
     await client.query("BEGIN");
-
-    const existing = await client.query(
-      "SELECT usuarioid FROM usuario WHERE email = $1",
-      [normalizedEmail]
-    );
-
+    const existing = await client.query("SELECT usuarioid FROM usuario WHERE email = $1", [normalizedEmail]);
     if (existing.rows.length > 0) {
       await client.query("ROLLBACK");
-      return res.status(409).json({
-        success: false,
-        message: "Ese correo ya está registrado.",
-      });
+      return res.status(409).json({ success: false, message: "Este correo ya está registrado." });
     }
 
-    const passwordhash = await bcrypt.hash(String(password), 10);
-    const rolid = Number(process.env.DEFAULT_MEDICO_ROLID || MEDICO_ROLE_ID);
-    const activo = String(process.env.DEFAULT_ACTIVO || "true") === "true";
-    const accountStatus = ACCOUNT_STATUS.PENDING_APPROVAL;
-    const emailVerificado = true;
-
-    const insertUsuario = await client.query(
-      `INSERT INTO usuario (
-         rolid,
-         email,
-         passwordhash,
-         fechacreacion,
-         activo,
-         account_status,
-         email_verificado,
-         email_verificado_at,
-         aprobado_por_admin
-       )
-       VALUES ($1,$2,$3,NOW(),$4,$5,$6,CASE WHEN $6 THEN NOW() ELSE NULL END,FALSE)
-       RETURNING usuarioid`,
-      [
-        rolid,
-        normalizedEmail,
-        passwordhash,
-        activo,
-        accountStatus,
-        emailVerificado,
-      ]
-    );
-
-    const usuarioid = insertUsuario.rows[0].usuarioid;
-    const medicoRow = await insertMedicoCompatible({
-      client,
-      usuarioid,
-      nombreCompletoTrim,
-      fechaSQL,
-      genero,
-      cedulaClean,
-      telefonoClean,
-      especialidadTrim,
+    const bodyCompleto = { nombreCompleto, fechanacimiento, genero, especialidad, cedula, telefono, fotoUrl, password, documentos, exequaturValidationToken };
+    const verification = await createPendingRegistration(client, {
+      email: normalizedEmail,
+      registrationData: bodyCompleto,
+      roleId: MEDICO_ROLE_ID,
     });
-
-    const profilePatch = {
-      meta: {
-        nombreCompleto: nombreCompletoTrim,
-        especialidad: especialidadTrim,
-        cedula: cedulaClean,
-        telefono: telefonoClean,
-        genero: String(genero || "").trim(),
-        fechanacimiento: fechaSQL,
-      },
-    };
-    if (fotoUrlTrim) profilePatch.fotoUrl = fotoUrlTrim;
-    await upsertUserProfileById(client, usuarioid, profilePatch);
-
-    if (cedulaProfesionalUrl) {
-      await saveMedicoDocument(client, {
-        usuarioid,
-        medicoid: String(medicoRow.medicoid || ""),
-        tipo: "cedula_profesional",
-        nombre: "Cedula profesional",
-        archivoUrl: cedulaProfesionalUrl,
-      });
-    }
-    if (certificadoEspecialidadUrl) {
-      await saveMedicoDocument(client, {
-        usuarioid,
-        medicoid: String(medicoRow.medicoid || ""),
-        tipo: "certificado_especialidad",
-        nombre: "Certificado de especialidad",
-        archivoUrl: certificadoEspecialidadUrl,
-      });
-    }
 
     await client.query("COMMIT");
+    const delivery = await sendEmailVerificationCodeEmail({ email: normalizedEmail, code: verification.codigo });
 
-    return res.status(201).json({
+    return res.status(200).json({
       success: true,
-      message:
-        "Medico registrado correctamente. Tu cuenta queda pendiente de aprobacion administrativa.",
-      medico: medicoRow,
-      usuarioid,
-      accountStatus,
-      requiresAdminApproval: true,
+      message: "Código enviado. Verifícalo para completar tu registro profesional.",
+      requiresEmailVerification: true,
+      ...(delivery?.devCode ? { devVerificationCode: delivery.devCode } : {}),
     });
   } catch (err) {
-    if (client) {
-      try {
-        await client.query("ROLLBACK");
-      } catch (_) {}
-    }
-
-    return res.status(500).json({
-      success: false,
-      message: "Error interno registrando médico.",
-      error: err?.message || String(err),
-    });
+    if (client) await client.query("ROLLBACK");
+    console.error("Error in register-medico-intent:", err);
+    return res.status(500).json({ success: false, message: "Error interno registrando médico." });
   } finally {
     if (client) client.release();
   }
 });
+
+router.post("/register/confirm", async (req, res) => {
+  const { email, codigo } = req.body;
+  const normalizedEmail = String(email || "").toLowerCase().trim();
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const verif = await verifyPendingRegistration(client, { email: normalizedEmail, codigo });
+    if (!verif.ok) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ success: false, message: verif.message });
+    }
+
+    const { roleId, registrationData, pendingId } = verif;
+    const body = registrationData;
+    let usuarioid = null;
+
+    if (roleId === MEDICO_ROLE_ID) {
+      const passwordhash = await bcrypt.hash(String(body.password), 10);
+      const ins = await client.query(
+        `INSERT INTO usuario (rolid, email, passwordhash, fechacreacion, activo, account_status, email_verificado, email_verificado_at, aprobado_por_admin)
+         VALUES ($1,$2,$3,NOW(),TRUE,'pendiente_aprobacion',TRUE,NOW(),FALSE)
+         RETURNING usuarioid`,
+        [roleId, normalizedEmail, passwordhash]
+      );
+      usuarioid = ins.rows[0].usuarioid;
+      const medico = await insertMedicoCompatible({
+        client, usuarioid,
+        nombreCompletoTrim: body.nombreCompleto,
+        fechaSQL: toSqlDate(body.fechanacimiento),
+        genero: body.genero,
+        cedulaClean: body.cedula,
+        telefonoClean: body.telefono,
+        especialidadTrim: body.especialidad
+      });
+      await upsertUserProfileById(client, usuarioid, {
+        meta: { nombreCompleto: body.nombreCompleto, especialidad: body.especialidad, cedula: body.cedula, telefono: body.telefono, genero: body.genero, fechanacimiento: body.fechanacimiento },
+        fotoUrl: body.fotoUrl
+      });
+      if (body.documentos?.cedulaProfesionalUrl) {
+        await saveMedicoDocument(client, { usuarioid, medicoid: String(medico.medicoid || ""), tipo: "cedula_profesional", nombre: "Cédula profesional", archivoUrl: body.documentos.cedulaProfesionalUrl });
+      }
+      if (body.documentos?.certificadoEspecialidadUrl) {
+        await saveMedicoDocument(client, { usuarioid, medicoid: String(medico.medicoid || ""), tipo: "certificado_especialidad", nombre: "Certificado de especialidad", archivoUrl: body.documentos.certificadoEspecialidadUrl });
+      }
+    } else {
+      const passwordhash = await bcrypt.hash(String(body.password), 10);
+      const ins = await client.query(
+        `INSERT INTO usuario (rolid, email, passwordhash, fechacreacion, activo, account_status, email_verificado, email_verificado_at)
+         VALUES ($1,$2,$3,NOW(),TRUE,'activa',TRUE,NOW())
+         RETURNING usuarioid`,
+        [roleId, normalizedEmail, passwordhash]
+      );
+      usuarioid = ins.rows[0].usuarioid;
+      await client.query(
+        `INSERT INTO paciente (usuarioid, nombres, apellidos, fechanacimiento, genero, cedula, telefono)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        [usuarioid, body.nombres, body.apellidos, toSqlDate(body.fechanacimiento), body.genero, body.cedula, body.telefono]
+      );
+    }
+
+    await deletePendingRegistration(client, pendingId);
+    await client.query("COMMIT");
+    return res.status(201).json({ success: true, message: "Registro completado con éxito.", usuarioid });
+  } catch (err) {
+    if (client) await client.query("ROLLBACK");
+    console.error("Error confirming registration:", err);
+    return res.status(500).json({ success: false, message: "Error al crear la cuenta." });
+  } finally {
+    if (client) client.release();
+  }
+});
+
 
 function renderEmailVerificationPage({
   title,

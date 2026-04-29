@@ -673,21 +673,47 @@ async function createMyCita({
       modalidad = modeValidation.modalidad;
     }
 
-    // --- BUSINESS LOGIC: Calulate commission split ---
+    // --- BUSINESS LOGIC: Calculate commission split and validate pricing ---
     const medicoBusinessResult = await client.query(
-      `SELECT tipo_plan, comision_porcentaje, membresia_activa, precio
+      `SELECT tipo_plan, comision_porcentaje, membresia_activa, precio, precio_videollamada 
        FROM medico WHERE medicoid::text = $1::text LIMIT 1`,
       [medicoId]
     );
     const medicoBusiness = medicoBusinessResult.rows[0] || {};
-    const finalPrecio = precio !== null ? precio : Number(medicoBusiness.precio || 0);
+    
+    // Determine base price based on modality subtype
+    let basePrecio = 0;
+    const virtualSubtype = body?.virtualSubtype || 'videollamada'; 
 
-    let comisionPje = Number(medicoBusiness.comision_porcentaje || 10);
-    // Si tiene membresía activa, la comisión es 0
-    if (medicoBusiness.tipo_plan === 'membresia' && medicoBusiness.membresia_activa) {
-      comisionPje = 0;
+    if (modalidad === 'virtual') {
+      if (virtualSubtype === 'chat') {
+        // Chat is ALWAYS FREE as per new requirements
+        basePrecio = 0;
+      } else {
+        // Videollamada is the PAID consultation
+        basePrecio = Number(medicoBusiness.precio_videollamada || medicoBusiness.precio || 1000);
+      }
+    } else {
+      // Presencial uses the general 'precio'
+      basePrecio = Number(medicoBusiness.precio || 1000);
     }
 
+    const finalPrecio = virtualSubtype === 'chat' ? 0 : (precio !== null ? precio : basePrecio);
+
+    // VALIDATION: Only for paid consultations (not for free chat)
+    if (virtualSubtype !== 'chat') {
+      if (finalPrecio < 500 || finalPrecio > 5000) {
+        await rollbackQuietly(client);
+        return serviceResult(400, {
+          success: false,
+          message: `El precio de la consulta (${finalPrecio}) está fuera del rango permitido (RD$500 - RD$5000).`,
+        });
+      }
+    }
+
+    // COMMISSION: Mandatory 15% for paid consultations
+    const comisionPje = virtualSubtype === 'chat' ? 0 : 15; 
+    
     const montoPlataforma = Number((finalPrecio * (comisionPje / 100)).toFixed(2));
     const montoMedico = Number((finalPrecio - montoPlataforma).toFixed(2));
     // --- END BUSINESS LOGIC ---
@@ -814,6 +840,11 @@ async function createMyCita({
       citaId,
       pacienteId: context.paciente.pacienteid,
       medicoId,
+    });
+
+    await appendSystemMessage(client, {
+      conversacionId,
+      text: "Este chat es para coordinación previa (ej: 'ya estoy listo'). Las consultas médicas se realizan únicamente por videollamada.",
     });
 
     let sala = null;

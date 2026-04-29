@@ -1401,6 +1401,7 @@ router.get("/me/citas/:citaId/video-sala", requireAuth, async (req, res) => {
             openedAt: sala.opened_at || null,
             closedAt: sala.closed_at || null,
             canJoin,
+            jitsiDomain: normalizeText(process.env.JITSI_BASE_URL || "meet.jit.si").replace(/^https?:\/\//, ""),
           }
         : null,
     });
@@ -1540,6 +1541,7 @@ router.post("/me/citas/:citaId/video-sala/abrir", requireAuth, async (req, res) 
             openedAt: sala.opened_at || null,
             closedAt: sala.closed_at || null,
             canJoin: doctorCanJoin,
+            jitsiDomain: normalizeText(process.env.JITSI_BASE_URL || "meet.jit.si").replace(/^https?:\/\//, ""),
           }
         : null,
     });

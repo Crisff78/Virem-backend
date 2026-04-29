@@ -162,6 +162,8 @@ function sanitizeMedicoForAudience(row, actor, options = {}) {
       ? String(row?.fotoUrl || "").trim() || null
       : null,
     precio: Number(row?.precio || 0),
+    precio_chat: Number(row?.precio_chat || 0),
+    precio_videollamada: Number(row?.precio_videollamada || 0),
     tipoPlan: String(row?.tipo_plan || 'comision'),
     comisionPorcentaje: Number(row?.comision_porcentaje || 10),
     membresiaActiva: Boolean(row?.membresia_activa),
@@ -370,6 +372,8 @@ router.get("/:id", requireAuth, async (req, res) => {
          ns.proximo_horario AS "proximoHorarioDisponible",
          mp.foto_url AS "fotoUrl",
          m.precio,
+         m.precio_chat,
+         m.precio_videollamada,
          m.fecharegistro
        FROM medico m
        LEFT JOIN especialidad e ON e.especialidadid = m.especialidadid
@@ -497,6 +501,9 @@ router.put(
     telefono,
     especialidad,
     consultorio,
+    precio,
+    precio_chat,
+    precio_videollamada,
   } = req.body;
 
   const nombreCompletoTrim = String(nombreCompleto || "").replace(/\s+/g, " ").trim();
@@ -531,8 +538,11 @@ router.put(
            cedula = $4,
            telefono = $5,
            especialidadid = $6,
-           consultorio = $7
-       WHERE medicoid::text = $8::text
+           consultorio = $7,
+           precio = $8,
+           precio_chat = $9,
+           precio_videollamada = $10
+       WHERE medicoid::text = $11::text
        RETURNING
          medicoid::text AS "medicoid",
          nombrecompleto AS "nombreCompleto",
@@ -542,6 +552,9 @@ router.put(
          telefono,
          consultorio,
          especialidadid,
+         precio,
+         precio_chat,
+         precio_videollamada,
          fecharegistro`,
       [
         nombreCompletoTrim,
@@ -551,6 +564,9 @@ router.put(
         telefonoClean,
         especialidadid,
         consultorioTrim,
+        Number(precio || 1000),
+        Number(precio_chat || 500),
+        Number(precio_videollamada || 1000),
         String(req.params.id),
       ]
     );
