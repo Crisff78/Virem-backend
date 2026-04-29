@@ -936,7 +936,14 @@ router.post("/register", async (req, res) => {
     });
 
     await client.query("COMMIT");
-    const delivery = await sendEmailVerificationCodeEmail({ email: normalizedEmail, code: verification.codigo });
+    let delivery = null;
+    try {
+      delivery = await sendEmailVerificationCodeEmail({ email: normalizedEmail, code: verification.codigo });
+    } catch (emailErr) {
+      console.error("⚠️ Error enviando email de verificación:", emailErr.message);
+      // No fallamos el registro completo si solo falló el envío del email, 
+      // pero informamos al usuario o logueamos el problema.
+    }
 
     return res.status(200).json({
       success: true,
@@ -945,9 +952,21 @@ router.post("/register", async (req, res) => {
       ...(delivery?.devCode ? { devVerificationCode: delivery.devCode } : {}),
     });
   } catch (err) {
-    if (client) await client.query("ROLLBACK");
-    console.error("Error in register-intent:", err);
-    return res.status(500).json({ success: false, message: "Error interno registrando paciente." });
+    if (client) {
+      try {
+        // Solo intentamos ROLLBACK si la conexión sigue abierta y no se ha hecho COMMIT
+        await client.query("ROLLBACK");
+      } catch (rbErr) {
+        // Silenciamos errores de rollback si la transacción ya terminó
+      }
+    }
+    console.error("❌ Error crítico en registro de paciente:", err);
+    return res.status(500).json({ 
+      success: false, 
+      message: "Error interno registrando paciente.",
+      error: err.message, // Exponemos el mensaje para debug
+      stack: process.env.NODE_ENV === 'production' ? undefined : err.stack
+    });
   } finally {
     if (client) client.release();
   }
@@ -982,7 +1001,12 @@ router.post("/register-medico", async (req, res) => {
     });
 
     await client.query("COMMIT");
-    const delivery = await sendEmailVerificationCodeEmail({ email: normalizedEmail, code: verification.codigo });
+    let delivery = null;
+    try {
+      delivery = await sendEmailVerificationCodeEmail({ email: normalizedEmail, code: verification.codigo });
+    } catch (emailErr) {
+      console.error("⚠️ Error enviando email de verificación (médico):", emailErr.message);
+    }
 
     return res.status(200).json({
       success: true,
@@ -991,9 +1015,17 @@ router.post("/register-medico", async (req, res) => {
       ...(delivery?.devCode ? { devVerificationCode: delivery.devCode } : {}),
     });
   } catch (err) {
-    if (client) await client.query("ROLLBACK");
-    console.error("Error in register-medico-intent:", err);
-    return res.status(500).json({ success: false, message: "Error interno registrando médico." });
+    if (client) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (rbErr) {}
+    }
+    console.error("❌ Error crítico en registro de médico:", err);
+    return res.status(500).json({ 
+      success: false, 
+      message: "Error interno registrando médico.",
+      error: process.env.NODE_ENV === 'production' ? undefined : err.message
+    });
   } finally {
     if (client) client.release();
   }

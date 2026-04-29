@@ -98,44 +98,54 @@ function generateEmailVerificationCode() {
   );
 }
 
-async function ensureRfCoreSchema() {
-  if (ensureRfCoreSchemaPromise) return ensureRfCoreSchemaPromise;
+async function ensureRfCoreSchema(dbClient = null) {
+  if (ensureRfCoreSchemaPromise && !dbClient) return ensureRfCoreSchemaPromise;
 
-  ensureRfCoreSchemaPromise = (async () => {
-    await pool.query(
+  const db = resolveDb(dbClient);
+  
+  const setupJob = (async () => {
+    await db.query(
       `ALTER TABLE paciente
        ADD COLUMN IF NOT EXISTS usuarioid INTEGER`
     );
-    await pool.query(
+    await db.query(
+      `ALTER TABLE paciente
+       ALTER COLUMN cedula TYPE VARCHAR(20)`
+    );
+    await db.query(
       `ALTER TABLE medico
        ADD COLUMN IF NOT EXISTS usuarioid INTEGER`
     );
+    await db.query(
+      `ALTER TABLE medico
+       ALTER COLUMN cedula TYPE VARCHAR(20)`
+    );
 
-    await pool.query(
+    await db.query(
       `ALTER TABLE usuario
        ADD COLUMN IF NOT EXISTS account_status VARCHAR(40) NOT NULL DEFAULT 'activa'`
     );
-    await pool.query(
+    await db.query(
       `ALTER TABLE usuario
        ADD COLUMN IF NOT EXISTS email_verificado BOOLEAN NOT NULL DEFAULT FALSE`
     );
-    await pool.query(
+    await db.query(
       `ALTER TABLE usuario
        ADD COLUMN IF NOT EXISTS email_verificado_at TIMESTAMPTZ`
     );
-    await pool.query(
+    await db.query(
       `ALTER TABLE usuario
        ADD COLUMN IF NOT EXISTS aprobado_por_admin BOOLEAN NOT NULL DEFAULT FALSE`
     );
 
-    await pool.query(
+    await db.query(
       `UPDATE usuario
        SET account_status = 'activa'
        WHERE account_status IS NULL
           OR btrim(account_status) = ''`
     );
 
-    await pool.query(
+    await db.query(
       `UPDATE usuario
        SET email_verificado = TRUE,
            email_verificado_at = COALESCE(email_verificado_at, NOW())
@@ -143,12 +153,12 @@ async function ensureRfCoreSchema() {
          AND account_status = 'activa'`
     );
 
-    await pool.query(
+    await db.query(
       `CREATE INDEX IF NOT EXISTS idx_usuario_account_status
        ON usuario (account_status, rolid, activo)`
     );
 
-    await pool.query(
+    await db.query(
       `CREATE TABLE IF NOT EXISTS pending_registration (
         id BIGSERIAL PRIMARY KEY,
         email TEXT NOT NULL UNIQUE,
@@ -161,12 +171,12 @@ async function ensureRfCoreSchema() {
       )`
     );
 
-    await pool.query(
+    await db.query(
       `CREATE INDEX IF NOT EXISTS idx_pending_registration_email_expires
        ON pending_registration (email, expires_at)`
     );
 
-    await pool.query(
+    await db.query(
       `CREATE TABLE IF NOT EXISTS email_verificacion_code (
         id BIGSERIAL PRIMARY KEY,
         usuarioid INTEGER NOT NULL REFERENCES usuario(usuarioid) ON DELETE CASCADE,
@@ -180,12 +190,12 @@ async function ensureRfCoreSchema() {
       )`
     );
 
-    await pool.query(
+    await db.query(
       `CREATE INDEX IF NOT EXISTS idx_email_verificacion_code_email_created
        ON email_verificacion_code (email, created_at DESC)`
     );
 
-    await pool.query(
+    await db.query(
       `CREATE TABLE IF NOT EXISTS medico_documento (
         documentoid UUID PRIMARY KEY,
         usuarioid INTEGER NOT NULL REFERENCES usuario(usuarioid) ON DELETE CASCADE,
@@ -200,12 +210,12 @@ async function ensureRfCoreSchema() {
       )`
     );
 
-    await pool.query(
+    await db.query(
       `CREATE INDEX IF NOT EXISTS idx_medico_documento_usuario_tipo
        ON medico_documento (usuarioid, tipo, estado_revision, creado_en DESC)`
     );
 
-    await pool.query(
+    await db.query(
       `CREATE TABLE IF NOT EXISTS user_modificacion_historial (
         id BIGSERIAL PRIMARY KEY,
         usuarioid INTEGER NOT NULL REFERENCES usuario(usuarioid) ON DELETE CASCADE,
@@ -217,12 +227,12 @@ async function ensureRfCoreSchema() {
       )`
     );
 
-    await pool.query(
+    await db.query(
       `CREATE INDEX IF NOT EXISTS idx_user_modificacion_historial_usuario_fecha
        ON user_modificacion_historial (usuarioid, created_at DESC)`
     );
 
-    await pool.query(
+    await db.query(
       `CREATE TABLE IF NOT EXISTS historia_clinica (
         historiaid BIGSERIAL PRIMARY KEY,
         citaid UUID NOT NULL UNIQUE,
@@ -241,17 +251,17 @@ async function ensureRfCoreSchema() {
       )`
     );
 
-    await pool.query(
+    await db.query(
       `CREATE INDEX IF NOT EXISTS idx_historia_clinica_paciente_fecha
        ON historia_clinica (pacienteid, created_at DESC)`
     );
 
-    await pool.query(
+    await db.query(
       `CREATE INDEX IF NOT EXISTS idx_historia_clinica_medico_fecha
        ON historia_clinica (medicoid_text, created_at DESC)`
     );
 
-    await pool.query(
+    await db.query(
       `CREATE TABLE IF NOT EXISTS pago (
         pagoid UUID PRIMARY KEY,
         citaid UUID NOT NULL UNIQUE,
@@ -268,27 +278,27 @@ async function ensureRfCoreSchema() {
       )`
     );
 
-    await pool.query(`ALTER TABLE pago ADD COLUMN IF NOT EXISTS pacienteid INTEGER`);
-    await pool.query(`ALTER TABLE pago ADD COLUMN IF NOT EXISTS medicoid_text TEXT`);
-    await pool.query(
+    await db.query(`ALTER TABLE pago ADD COLUMN IF NOT EXISTS pacienteid INTEGER`);
+    await db.query(`ALTER TABLE pago ADD COLUMN IF NOT EXISTS medicoid_text TEXT`);
+    await db.query(
       `ALTER TABLE pago ADD COLUMN IF NOT EXISTS moneda CHAR(3) DEFAULT 'DOP'`
     );
-    await pool.query(`ALTER TABLE pago ADD COLUMN IF NOT EXISTS metodo_pago VARCHAR(40)`);
-    await pool.query(
+    await db.query(`ALTER TABLE pago ADD COLUMN IF NOT EXISTS metodo_pago VARCHAR(40)`);
+    await db.query(
       `ALTER TABLE pago ADD COLUMN IF NOT EXISTS estado VARCHAR(40) DEFAULT 'simulado_aprobado'`
     );
-    await pool.query(`ALTER TABLE pago ADD COLUMN IF NOT EXISTS referencia_externa TEXT`);
-    await pool.query(
+    await db.query(`ALTER TABLE pago ADD COLUMN IF NOT EXISTS referencia_externa TEXT`);
+    await db.query(
       `ALTER TABLE pago ADD COLUMN IF NOT EXISTS detalle_json JSONB DEFAULT '{}'::jsonb`
     );
-    await pool.query(
+    await db.query(
       `ALTER TABLE pago ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW()`
     );
-    await pool.query(
+    await db.query(
       `ALTER TABLE pago ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()`
     );
 
-    await pool.query(`DO $$
+    await db.query(`DO $$
     BEGIN
       IF EXISTS (
         SELECT 1
@@ -351,7 +361,7 @@ async function ensureRfCoreSchema() {
       END IF;
     END $$`);
 
-    await pool.query(
+    await db.query(
       `UPDATE pago p
        SET pacienteid = c.pacienteid,
            medicoid_text = c.medicoid::text
@@ -359,30 +369,30 @@ async function ensureRfCoreSchema() {
        WHERE p.citaid = c.citaid
          AND (p.pacienteid IS NULL OR p.medicoid_text IS NULL)`
     );
-    await pool.query(
+    await db.query(
       `UPDATE pago
        SET moneda = 'DOP'
        WHERE moneda IS NULL
           OR btrim(moneda) = ''`
     );
-    await pool.query(
+    await db.query(
       `UPDATE pago
        SET metodo_pago = 'tarjeta'
        WHERE metodo_pago IS NULL
           OR btrim(metodo_pago) = ''`
     );
-    await pool.query(
+    await db.query(
       `UPDATE pago
        SET estado = 'simulado_aprobado'
        WHERE estado IS NULL
           OR btrim(estado) = ''`
     );
-    await pool.query(
+    await db.query(
       `UPDATE pago
        SET detalle_json = '{}'::jsonb
        WHERE detalle_json IS NULL`
     );
-    await pool.query(
+    await db.query(
       `UPDATE pago
        SET created_at = COALESCE(created_at, NOW()),
            updated_at = COALESCE(updated_at, created_at, NOW())
@@ -390,12 +400,12 @@ async function ensureRfCoreSchema() {
           OR updated_at IS NULL`
     );
 
-    await pool.query(
+    await db.query(
       `CREATE INDEX IF NOT EXISTS idx_pago_paciente_fecha
        ON pago (pacienteid, created_at DESC)`
     );
 
-    await pool.query(
+    await db.query(
       `CREATE TABLE IF NOT EXISTS factura (
         facturaid UUID PRIMARY KEY,
         pagoid UUID NOT NULL REFERENCES pago(pagoid) ON DELETE CASCADE,
@@ -408,23 +418,23 @@ async function ensureRfCoreSchema() {
       )`
     );
 
-    await pool.query(`ALTER TABLE factura ADD COLUMN IF NOT EXISTS pacienteid INTEGER`);
-    await pool.query(
+    await db.query(`ALTER TABLE factura ADD COLUMN IF NOT EXISTS pacienteid INTEGER`);
+    await db.query(
       `ALTER TABLE factura ADD COLUMN IF NOT EXISTS moneda CHAR(3) DEFAULT 'DOP'`
     );
-    await pool.query(
+    await db.query(
       `ALTER TABLE factura ADD COLUMN IF NOT EXISTS detalle_json JSONB DEFAULT '{}'::jsonb`
     );
-    await pool.query(
+    await db.query(
       `ALTER TABLE factura ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW()`
     );
 
-    await pool.query(
+    await db.query(
       `CREATE INDEX IF NOT EXISTS idx_factura_paciente_fecha
        ON factura (pacienteid, created_at DESC)`
     );
 
-    await pool.query(
+    await db.query(
       `CREATE TABLE IF NOT EXISTS valoracion (
         valoracionid BIGSERIAL PRIMARY KEY,
         citaid UUID NOT NULL,
@@ -442,16 +452,20 @@ async function ensureRfCoreSchema() {
       )`
     );
 
-    await pool.query(
+    await db.query(
       `CREATE INDEX IF NOT EXISTS idx_valoracion_medico_estado
        ON valoracion (medicoid_text, estado_moderacion, created_at DESC)`
     );
-  })().catch((err) => {
-    ensureRfCoreSchemaPromise = null;
-    throw err;
-  });
+  })();
 
-  return ensureRfCoreSchemaPromise;
+  if (!dbClient) {
+    ensureRfCoreSchemaPromise = setupJob.catch((err) => {
+      ensureRfCoreSchemaPromise = null;
+      throw err;
+    });
+  }
+
+  return setupJob;
 }
 
 function resolveLoginAccessState(userRow, options = {}) {
@@ -545,7 +559,7 @@ async function createEmailVerificationCode(
   { usuarioid, email, ttlMinutes = EMAIL_CODE_TTL_MINUTES }
 ) {
   const db = resolveDb(dbClient);
-  await ensureRfCoreSchema();
+  await ensureRfCoreSchema(db);
 
   const normalizedEmail = normalizeText(email).toLowerCase();
   const code = generateEmailVerificationCode();
@@ -590,7 +604,7 @@ async function createPendingRegistration(
   { email, registrationData, roleId, ttlMinutes = EMAIL_CODE_TTL_MINUTES }
 ) {
   const db = resolveDb(dbClient);
-  await ensureRfCoreSchema();
+  await ensureRfCoreSchema(db);
 
   const normalizedEmail = normalizeText(email).toLowerCase();
   const code = generateEmailVerificationCode();
@@ -627,7 +641,7 @@ async function createPendingRegistration(
 
 async function verifyPendingRegistration(dbClient, { email, codigo }) {
   const db = resolveDb(dbClient);
-  await ensureRfCoreSchema();
+  await ensureRfCoreSchema(db);
 
   const normalizedEmail = normalizeText(email).toLowerCase();
   const cleanCode = normalizeText(codigo);
@@ -686,7 +700,7 @@ async function deletePendingRegistration(dbClient, id) {
 
 async function verifyEmailVerificationCode(dbClient, { email, codigo }) {
   const db = resolveDb(dbClient);
-  await ensureRfCoreSchema();
+  await ensureRfCoreSchema(db);
 
   const normalizedEmail = normalizeText(email).toLowerCase();
   const cleanCode = normalizeText(codigo);
