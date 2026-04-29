@@ -94,18 +94,7 @@ async function fetchConversationForContext(client, { conversacionId, context, lo
   return result.rows[0] || null;
 }
 
-router.use(async (_req, res, next) => {
-  try {
-    await ensurePlatformSchema();
-    return next();
-  } catch (err) {
-    console.error("Error inicializando esquema platform:", err);
-    return res.status(500).json({
-      success: false,
-      message: "No se pudo preparar el esquema de plataforma.",
-    });
-  }
-});
+// Schema is now initialized at startup in index.js
 
 router.get("/catalogos/especialidades", requireAuth, async (_req, res) => {
   try {

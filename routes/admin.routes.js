@@ -1,4 +1,4 @@
-﻿const express = require("express");
+const express = require("express");
 const pool = require("../config/db");
 const { requireAuth } = require("./middleware/auth");
 const {
@@ -94,17 +94,7 @@ async function requireAdminContext(client, reqUser) {
 }
 
 router.use(requireAuth);
-router.use(async (_req, res, next) => {
-  try {
-    await Promise.all([ensureRfCoreSchema(), ensurePlatformSchema(), ensureUserProfileTable()]);
-    return next();
-  } catch (err) {
-    return res.status(500).json({
-      success: false,
-      message: "No se pudo preparar el esquema administrativo.",
-    });
-  }
-});
+// Schema is now initialized at startup in index.js
 
 // ===============================
 // GET /api/admin/panel

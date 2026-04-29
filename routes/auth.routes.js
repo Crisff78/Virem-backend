@@ -19,6 +19,9 @@ const {
   resolveLoginAccessState,
   normalizeAccountStatus,
   createEmailVerificationCode,
+  createPendingRegistration,
+  verifyPendingRegistration,
+  deletePendingRegistration,
   verifyEmailVerificationCode,
   saveMedicoDocument,
 } = require("../services/rf-core");

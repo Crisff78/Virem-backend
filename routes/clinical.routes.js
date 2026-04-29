@@ -1,4 +1,4 @@
-﻿const express = require("express");
+const express = require("express");
 const pool = require("../config/db");
 const { requireAuth } = require("./middleware/auth");
 const {
@@ -76,18 +76,7 @@ async function hasPatientConsent(client, pacienteId) {
 }
 
 router.use(requireAuth);
-router.use(async (_req, res, next) => {
-  try {
-    await ensureRfCoreSchema();
-    await ensureUserProfileTable();
-    return next();
-  } catch (err) {
-    return res.status(500).json({
-      success: false,
-      message: "No se pudo preparar el modulo clinico.",
-    });
-  }
-});
+// Schema is now initialized at startup in index.js
 
 // ===============================
 // POST /api/clinical/me/citas/:citaId/historia

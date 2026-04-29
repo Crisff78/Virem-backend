@@ -21,10 +21,26 @@ if (envValidation.errors.length) {
   process.exit(1);
 }
 
+const { ensureRfCoreSchema } = require("./services/rf-core");
+const { ensurePlatformSchema, ensureEstadoCatalog } = require("./services/platform-core");
+const { ensureUserProfileTable } = require("./services/user-profile.store");
+
 pool.query("SELECT NOW()")
-  .then(res => {
+  .then(async res => {
     console.log("✅ Conectado a Supabase correctamente");
-    console.log(res.rows);
+    try {
+      console.log("⏳ Inicializando esquemas de base de datos...");
+      await Promise.all([
+        ensureRfCoreSchema(),
+        ensurePlatformSchema(),
+        ensureUserProfileTable()
+      ]);
+      
+      await ensureEstadoCatalog(pool);
+      console.log("✅ Todos los esquemas han sido verificados.");
+    } catch (err) {
+      console.error("❌ Error inicializando esquemas:", err.message);
+    }
   })
   .catch(err => {
     console.error("❌ Error conectando a Supabase:", err.message);

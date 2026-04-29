@@ -274,6 +274,16 @@ async function ensurePlatformSchema() {
     );
 
     await pool.query(
+      `CREATE TABLE IF NOT EXISTS medico_horario_recurrente (
+        medicoid UUID PRIMARY KEY REFERENCES medico(medicoid) ON DELETE CASCADE,
+        pattern JSONB NOT NULL DEFAULT '[]'::jsonb,
+        modalidad VARCHAR(16) NOT NULL DEFAULT 'ambas',
+        slot_minutos INTEGER NOT NULL DEFAULT 30,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`
+    );
+
+    await pool.query(
       `CREATE TABLE IF NOT EXISTS notificaciones (
         notificacionid BIGSERIAL PRIMARY KEY,
         usuarioid INTEGER NOT NULL REFERENCES usuario(usuarioid) ON DELETE CASCADE,
