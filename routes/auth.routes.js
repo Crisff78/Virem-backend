@@ -24,6 +24,8 @@ const {
   deletePendingRegistration,
   verifyEmailVerificationCode,
   saveMedicoDocument,
+  hashEmailVerificationCode,
+  generateEmailVerificationCode,
 } = require("../services/rf-core");
 
 const router = express.Router();
@@ -1810,6 +1812,92 @@ router.get("/me", requireAuth, async (req, res) => {
   } catch (err) {
     console.error("Error auth/me:", err);
     return res.status(500).json({ success: false, message: "Error interno obteniendo perfil." });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+/**
+ * ===============================
+ * POST /api/auth/resend-verification-pending
+ * Reenvia codigo para registro pendiente
+ * ===============================
+ */
+router.post("/resend-verification-pending", async (req, res) => {
+  const email = String(req.body?.email || "")
+    .toLowerCase()
+    .trim();
+
+  if (!isValidEmail(email)) {
+    return res.status(400).json({
+      success: false,
+      message: "Correo inválido.",
+    });
+  }
+
+  let client;
+  try {
+    await ensureRfCoreSchema();
+    client = await pool.connect();
+
+    const pendingResult = await client.query(
+      `SELECT id, registration_data, role_id, verification_code_hash, expires_at
+       FROM pending_registration
+       WHERE email = $1
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [email]
+    );
+
+    if (!pendingResult.rows.length) {
+      return res.json({
+        success: true,
+        message: "Si existe un registro pendiente, te enviaremos un nuevo código.",
+      });
+    }
+
+    const row = pendingResult.rows[0];
+    const expiresAt = new Date(row.expires_at).getTime();
+    const nowMs = Date.now();
+
+    // Verificar si el registro pendiente aún es válido
+    if (expiresAt <= nowMs) {
+      await client.query("DELETE FROM pending_registration WHERE id = $1", [row.id]);
+      return res.json({
+        success: true,
+        message: "Si existe un registro pendiente, te enviaremos un nuevo código.",
+      });
+    }
+
+    // Generar nuevo código
+    const newCode = generateEmailVerificationCode();
+    const normalizedEmail = normalizeComparableText(email).toLowerCase();
+    const newCodeHash = hashEmailVerificationCode(normalizedEmail, newCode);
+
+    await client.query(
+      `UPDATE pending_registration
+       SET verification_code_hash = $1, created_at = NOW()
+       WHERE id = $2`,
+      [newCodeHash, row.id]
+    );
+
+    const delivery = await sendEmailVerificationCodeEmail({
+      email,
+      code: newCode,
+    });
+
+    return res.json({
+      success: true,
+      message: "Se envió un nuevo código de verificación.",
+      ...(delivery?.devCode ? { devVerificationCode: delivery.devCode } : {}),
+    });
+  } catch (err) {
+    console.error("Error resend-verification-pending:", err);
+    return res.status(500).json({
+      success: false,
+      message: "No se pudo reenviar el código.",
+      error: err?.message || String(err),
+    });
   } finally {
     if (client) client.release();
   }

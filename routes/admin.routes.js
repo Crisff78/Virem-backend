@@ -13,6 +13,7 @@ const { ensurePlatformSchema } = require("../services/platform-core");
 const { ensureUserProfileTable } = require("../services/user-profile.store");
 
 const router = express.Router();
+const DEFAULT_DOCTOR_MEMBERSHIP_FEE = 1000;
 
 function toInt(value, fallback = 0) {
   const parsed = Number(value);
@@ -1132,8 +1133,6 @@ router.get("/presupuesto", async (req, res) => {
 
     // Calculate current month and previous month for comparison
     const prevMonth = new Date(currentMonth.getFullYear(), currentMonth.getMonth() - 1, 1);
-    const prevMonthEnd = new Date(currentMonth.getFullYear(), currentMonth.getMonth(), 0);
-
     const [
       ingresosMes,
       ingresosMesAnterior,
@@ -1146,6 +1145,16 @@ router.get("/presupuesto", async (req, res) => {
       client.query(
         `SELECT 
            COUNT(*)::int AS total_citas,
+           COUNT(*) FILTER (WHERE lower(COALESCE(modalidad, 'presencial')) = 'presencial')::int AS citas_presenciales,
+           COUNT(*) FILTER (WHERE lower(COALESCE(modalidad, 'presencial')) = 'virtual')::int AS citas_virtuales,
+           COALESCE(
+             SUM(monto_plataforma) FILTER (WHERE lower(COALESCE(modalidad, 'presencial')) = 'presencial'),
+             0
+           )::numeric(14,2) AS comision_presencial,
+           COALESCE(
+             SUM(monto_plataforma) FILTER (WHERE lower(COALESCE(modalidad, 'presencial')) = 'virtual'),
+             0
+           )::numeric(14,2) AS comision_virtual,
            COALESCE(SUM(monto_plataforma), 0)::numeric(14,2) AS comision_total,
            COALESCE(SUM(monto_medico), 0)::numeric(14,2) AS monto_medicos,
            COALESCE(SUM(precio), 0)::numeric(14,2) AS monto_total
@@ -1159,6 +1168,16 @@ router.get("/presupuesto", async (req, res) => {
       client.query(
         `SELECT 
            COUNT(*)::int AS total_citas,
+           COUNT(*) FILTER (WHERE lower(COALESCE(modalidad, 'presencial')) = 'presencial')::int AS citas_presenciales,
+           COUNT(*) FILTER (WHERE lower(COALESCE(modalidad, 'presencial')) = 'virtual')::int AS citas_virtuales,
+           COALESCE(
+             SUM(monto_plataforma) FILTER (WHERE lower(COALESCE(modalidad, 'presencial')) = 'presencial'),
+             0
+           )::numeric(14,2) AS comision_presencial,
+           COALESCE(
+             SUM(monto_plataforma) FILTER (WHERE lower(COALESCE(modalidad, 'presencial')) = 'virtual'),
+             0
+           )::numeric(14,2) AS comision_virtual,
            COALESCE(SUM(monto_plataforma), 0)::numeric(14,2) AS comision_total,
            COALESCE(SUM(monto_medico), 0)::numeric(14,2) AS monto_medicos,
            COALESCE(SUM(precio), 0)::numeric(14,2) AS monto_total
@@ -1189,8 +1208,18 @@ router.get("/presupuesto", async (req, res) => {
       ),
       // Suscripciones (médicos con membresía activa)
       client.query(
-        `SELECT COUNT(*)::int AS total FROM medico
-         WHERE membresia_activa = TRUE`
+        `SELECT 
+           COUNT(*)::int AS total,
+           COALESCE(
+             SUM(COALESCE(NULLIF(m.membresia_monto, 0), $1)),
+             0
+           )::numeric(14,2) AS monto_total
+         FROM medico m
+         JOIN usuario u ON u.usuarioid = m.usuarioid
+         WHERE m.membresia_activa = TRUE
+           AND u.activo = TRUE
+           AND u.account_status = $2`,
+        [DEFAULT_DOCTOR_MEMBERSHIP_FEE, ACCOUNT_STATUS.ACTIVE]
       ),
     ]);
 
@@ -1214,28 +1243,76 @@ router.get("/presupuesto", async (req, res) => {
     const ingresoFarmaceutico = toMoney(citasEste.total_citas || 0) * 10; // $10 estimado por consulta
     
     const totalIngresos = toMoney(ingresoSuscripciones + ingresoComisiones + ingresoFarmaceutico);
+    const medicosConMembresia = toInt(suscripciones.rows[0]?.total || 0);
+    const citasPresencialesPagadas = toInt(citasEste.citas_presenciales || 0);
+    const citasVirtualesPagadas = toInt(citasEste.citas_virtuales || 0);
+    const ingresoSuscripcionesReal = toMoney(suscripciones.rows[0]?.monto_total || 0);
+    const ingresoComisionPresencial = toMoney(citasEste.comision_presencial || 0);
+    const ingresoComisionVirtual = toMoney(citasEste.comision_virtual || 0);
+    const totalIngresosReal = toMoney(ingresoSuscripcionesReal + ingresoComisiones);
+    const filasTabla = [
+      {
+        id: "membresias-medicas",
+        concepto: "Membresias de medicos",
+        valor: ingresoSuscripcionesReal,
+        notas: medicosConMembresia
+          ? `Ingresos generados por ${medicosConMembresia} medicos con membresia activa.`
+          : "No hay medicos con membresia activa registrada en el periodo.",
+      },
+      {
+        id: "comision-consultas-presenciales",
+        concepto: "Comision por consultas presenciales",
+        valor: ingresoComisionPresencial,
+        notas: citasPresencialesPagadas
+          ? `Comision de la plataforma sobre ${citasPresencialesPagadas} consultas presenciales pagadas.`
+          : "No se registran consultas presenciales pagadas en el periodo.",
+      },
+      {
+        id: "comision-videoconsultas",
+        concepto: "Comision por videoconsultas",
+        valor: ingresoComisionVirtual,
+        notas: citasVirtualesPagadas
+          ? `Comision de la plataforma sobre ${citasVirtualesPagadas} videoconsultas pagadas. El chat previo no genera cobro.`
+          : "No se registran videoconsultas pagadas en el periodo.",
+      },
+    ];
 
     return res.json({
       success: true,
       presupuesto: {
+        moneda: "DOP",
         periodo: {
           mes: currentMonth.toLocaleString('es-ES', { month: 'long', year: 'numeric' }),
           inicio: monthStart.toISOString().split('T')[0],
           fin: monthEnd.toISOString().split('T')[0],
         },
         ingresosMes: {
-          suscripciones: toMoney(ingresoSuscripciones),
+          suscripciones: ingresoSuscripcionesReal,
+          comisionesPresenciales: ingresoComisionPresencial,
+          comisionesVirtuales: ingresoComisionVirtual,
           comisiones: ingresoComisiones,
-          serviciosFarmaceuticos: toMoney(ingresoFarmaceutico),
-          total: totalIngresos,
+          total: totalIngresosReal,
         },
         ingresosMesAnterior: toMoney(citasAnterior.comision_total || 0),
         variacionPorcentaje: parseFloat(variacion),
+        tabla: {
+          titulo: "Estimado de ingresos mensuales",
+          columnas: {
+            concepto: "Concepto",
+            valor: "Valor",
+            notas: "Notas",
+          },
+          filas: filasTabla,
+          total: totalIngresosReal,
+          fuente: "Fuente: VIREM, panel administrativo",
+        },
         estadisticas: {
           citasTotales: toInt(citasMes.rows[0]?.total || 0),
           citasPagadas: toInt(citasPagadas.rows[0]?.total || 0),
           medicoActivos,
-          medicos ConMembresia: medicirosConMembresia,
+          medicosConMembresia,
+          consultasPresencialesPagadas: citasPresencialesPagadas,
+          consultasVirtualesPagadas: citasVirtualesPagadas,
           montoMedicosMes: toMoney(citasEste.monto_medicos || 0),
         },
       },

@@ -952,4 +952,6 @@ module.exports = {
   listMedicoDocumentsByUsuarioId,
   recordUserModification,
   buildInvoiceNumber,
+  hashEmailVerificationCode,
+  generateEmailVerificationCode,
 };

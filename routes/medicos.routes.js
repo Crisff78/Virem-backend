@@ -788,8 +788,8 @@ router.get("/me/finanzas", requireAuth, async (req, res) => {
         },
         resumen: {
           balanceDisponible: toMoney(balanceDisponible),
-          ingresosEste Mes: montoEsteMes,
-          ingresosUltimo Mes: montoMesAnterior,
+          ingresosEsteMes: montoEsteMes,
+          ingresosUltimoMes: montoMesAnterior,
           variacionPorcentaje: parseFloat(variacion),
           pagosEnTransito: toMoney(montoEsteMes * 0.2), // 20% retenido
         },
