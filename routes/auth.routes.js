@@ -225,12 +225,29 @@ function buildEmailVerificationLink(email, code) {
 }
 
 async function sendRecoveryCodeEmail({ email, code }) {
+  const makeWebhookUrl = String(process.env.MAKE_WEBHOOK_URL || "").trim();
   const transporter = getRecoveryTransporter();
   const fromEmail =
     String(process.env.RECOVERY_EMAIL_FROM || "").trim() ||
     String(process.env.SMTP_FROM || "").trim() ||
     String(process.env.SMTP_USER || "").trim() ||
     "no-reply@virem.local";
+
+  // Si tenemos Webhook de Make, enviamos los datos allí primero
+  if (makeWebhookUrl) {
+    try {
+      await axios.post(makeWebhookUrl, {
+        type: 'recovery_code',
+        email: email,
+        code: code,
+        timestamp: new Date().toISOString()
+      });
+      console.log(`✅ Código de recuperación enviado a Make.com para ${email}`);
+      return { delivered: true };
+    } catch (makeError) {
+      console.error(`❌ Error enviando recuperación a Make.com: ${makeError.message}`);
+    }
+  }
 
   if (!transporter) {
     if (!allowConsoleEmailFallback()) {
@@ -276,17 +293,6 @@ async function sendEmailVerificationCodeEmail({ email, code }) {
     String(process.env.SMTP_FROM || "").trim() ||
     "no-reply@virem.local";
 
-  if (!transporter) {
-    if (!allowConsoleEmailFallback()) {
-      throw new Error(
-        "SMTP no configurado. Define SMTP_URL o SMTP_HOST/SMTP_USER/SMTP_PASS. Si quieres modo consola, usa EMAIL_FALLBACK_TO_CONSOLE=true."
-      );
-    }
-
-    console.warn(`[VERIFY] Codigo para ${email}: ${code}`);
-    return { delivered: false, devCode: code };
-  }
-
   // Si tenemos Webhook de Make, enviamos los datos allí primero
   if (makeWebhookUrl) {
     try {
@@ -301,8 +307,18 @@ async function sendEmailVerificationCodeEmail({ email, code }) {
       return { delivered: true };
     } catch (makeError) {
       console.error(`❌ Error enviando a Make.com: ${makeError.message}`);
-      // Si falla Make, intentamos seguir con SMTP normal si está configurado
     }
+  }
+
+  if (!transporter) {
+    if (!allowConsoleEmailFallback()) {
+      throw new Error(
+        "SMTP no configurado. Define SMTP_URL o SMTP_HOST/SMTP_USER/SMTP_PASS. Si quieres modo consola, usa EMAIL_FALLBACK_TO_CONSOLE=true."
+      );
+    }
+
+    console.warn(`[VERIFY] Codigo para ${email}: ${code}`);
+    return { delivered: false, devCode: code };
   }
 
   try {
