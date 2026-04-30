@@ -2,8 +2,6 @@ const axios = require("axios");
 const cheerio = require("cheerio");
 const fs = require("fs");
 const https = require("https");
-const { wrapper } = require("axios-cookiejar-support");
-const tough = require("tough-cookie");
 
 const WP_URL =
   "https://sns.gob.do/herramientas-de-consulta/consulta-de-exequatur/";
@@ -122,22 +120,57 @@ function buildHttpsAgent() {
 }
 
 function buildClient() {
-  return wrapper(
-    axios.create({
-      jar: new tough.CookieJar(),
-      httpsAgent: buildHttpsAgent(),
-      withCredentials: true,
-      timeout: SNS_TIMEOUT_MS,
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
-        Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "es-DO,es;q=0.9,en;q=0.8",
-        Connection: "keep-alive",
-      },
-    })
-  );
+  return axios.create({
+    httpsAgent: buildHttpsAgent(),
+    timeout: SNS_TIMEOUT_MS,
+    maxRedirects: 5,
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+      Accept:
+        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": "es-DO,es;q=0.9,en;q=0.8",
+      Connection: "keep-alive",
+    },
+  });
+}
+
+function createCookieStore() {
+  return new Map();
+}
+
+function captureCookies(store, headers) {
+  const setCookie = headers?.["set-cookie"];
+  if (!Array.isArray(setCookie)) return;
+
+  for (const entry of setCookie) {
+    const pair = String(entry || "").split(";")[0].trim();
+    if (!pair || !pair.includes("=")) continue;
+    const cookieName = pair.split("=")[0].trim();
+    if (!cookieName) continue;
+    store.set(cookieName, pair);
+  }
+}
+
+function getCookieHeader(store) {
+  if (!store || store.size === 0) return "";
+  return Array.from(store.values()).join("; ");
+}
+
+async function requestWithCookies(client, cookieStore, config) {
+  const headers = { ...(config?.headers || {}) };
+  const cookieHeader = getCookieHeader(cookieStore);
+  if (cookieHeader) {
+    headers.Cookie = cookieHeader;
+  }
+
+  const response = await client.request({
+    ...config,
+    headers,
+  });
+
+  captureCookies(cookieStore, response.headers);
+  return response;
 }
 
 function parseSnsError(error) {
@@ -187,7 +220,11 @@ function buildSnsFailureReason(parsed) {
 }
 
 async function consultarConCliente({ client, fullName }) {
-  const wpResponse = await client.get(WP_URL);
+  const cookieStore = createCookieStore();
+  const wpResponse = await requestWithCookies(client, cookieStore, {
+    method: "GET",
+    url: WP_URL,
+  });
   const $wp = cheerio.load(wpResponse.data);
 
   const iframeSrc = $wp("iframe").attr("src");
@@ -203,7 +240,10 @@ async function consultarConCliente({ client, fullName }) {
     ? iframeSrc
     : new URL(iframeSrc, WP_URL).href;
 
-  const getResponse = await client.get(ASPX_URL);
+  const getResponse = await requestWithCookies(client, cookieStore, {
+    method: "GET",
+    url: ASPX_URL,
+  });
   const $ = cheerio.load(getResponse.data);
 
   if (!$("#__VIEWSTATE").val()) {
@@ -230,7 +270,10 @@ async function consultarConCliente({ client, fullName }) {
   formData.set("__EVENTTARGET", "");
   formData.set("__EVENTARGUMENT", "");
 
-  const postResponse = await client.post(ASPX_URL, formData.toString(), {
+  const postResponse = await requestWithCookies(client, cookieStore, {
+    method: "POST",
+    url: ASPX_URL,
+    data: formData.toString(),
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
       Referer: ASPX_URL,

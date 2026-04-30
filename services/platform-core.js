@@ -274,6 +274,16 @@ async function ensurePlatformSchema() {
     );
 
     await pool.query(
+      `CREATE TABLE IF NOT EXISTS medico_horario_recurrente (
+        medicoid UUID PRIMARY KEY REFERENCES medico(medicoid) ON DELETE CASCADE,
+        pattern JSONB NOT NULL DEFAULT '[]'::jsonb,
+        modalidad VARCHAR(16) NOT NULL DEFAULT 'ambas',
+        slot_minutos INTEGER NOT NULL DEFAULT 30,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`
+    );
+
+    await pool.query(
       `CREATE TABLE IF NOT EXISTS notificaciones (
         notificacionid BIGSERIAL PRIMARY KEY,
         usuarioid INTEGER NOT NULL REFERENCES usuario(usuarioid) ON DELETE CASCADE,
@@ -876,6 +886,14 @@ async function fetchCitaByIdForContext(client, { citaId, context, lock = false }
       c.cancelacion_motivo,
       c.disponibilidadid::text AS disponibilidadid,
       c.videosalaid::text AS videosalaid,
+      c.pago_completado,
+      c.pago_metodo,
+      c.pago_referencia,
+      c.pago_fecha,
+      c.monto_total,
+      c.monto_plataforma,
+      c.monto_medico,
+      c.comision_aplicada,
       c.updated_at,
       COALESCE(ec.nombre, 'Pendiente') AS estado_nombre,
       COALESCE(ec.codigo, c.estado_codigo, 'pendiente') AS estado_code,
@@ -892,7 +910,7 @@ async function fetchCitaByIdForContext(client, { citaId, context, lock = false }
     LEFT JOIN paciente p ON p.pacienteid = c.pacienteid
     WHERE ${conditions.join(" AND ")}
     LIMIT 1
-    ${lock ? "FOR UPDATE" : ""}`;
+    ${lock ? "FOR UPDATE OF c" : ""}`;
 
   const result = await client.query(sql, params);
   return result.rows[0] || null;
@@ -917,6 +935,14 @@ function buildCitaResponse(row) {
     cancelacionMotivo: normalizeText(row.cancelacion_motivo),
     disponibilidadId: normalizeText(row.disponibilidadid),
     videoSalaId: normalizeText(row.videosalaid),
+    pagoCompletado: Boolean(row.pago_completado),
+    pagoMetodo: normalizeText(row.pago_metodo),
+    pagoReferencia: normalizeText(row.pago_referencia),
+    pagoFecha: row.pago_fecha || null,
+    montoTotal: Number(row.monto_total || 0),
+    montoPlataforma: Number(row.monto_plataforma || 0),
+    montoMedico: Number(row.monto_medico || 0),
+    comisionAplicada: Number(row.comision_aplicada || 0),
     updatedAt: row.updated_at || null,
     medico: {
       medicoid: String(row.medicoid || ""),

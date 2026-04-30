@@ -1,4 +1,4 @@
-﻿const express = require("express");
+const express = require("express");
 const { randomUUID } = require("crypto");
 const pool = require("../config/db");
 const { requireAuth } = require("./middleware/auth");
@@ -21,17 +21,7 @@ function toMoney(value, fallback = 0) {
 }
 
 router.use(requireAuth);
-router.use(async (_req, res, next) => {
-  try {
-    await ensureRfCoreSchema();
-    return next();
-  } catch (err) {
-    return res.status(500).json({
-      success: false,
-      message: "No se pudo preparar el modulo de pagos.",
-    });
-  }
-});
+// Schema is now initialized at startup in index.js
 
 // ===============================
 // POST /api/payments/me/citas/:citaId/procesar

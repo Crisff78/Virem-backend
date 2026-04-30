@@ -1,4 +1,5 @@
 const express = require("express");
+const axios = require("axios");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const nodemailer = require("nodemailer");
@@ -19,8 +20,13 @@ const {
   resolveLoginAccessState,
   normalizeAccountStatus,
   createEmailVerificationCode,
+  createPendingRegistration,
+  verifyPendingRegistration,
+  deletePendingRegistration,
   verifyEmailVerificationCode,
   saveMedicoDocument,
+  hashEmailVerificationCode,
+  generateEmailVerificationCode,
 } = require("../services/rf-core");
 
 const router = express.Router();
@@ -85,6 +91,11 @@ const RECOVERY_HASH_SECRET =
 
 let recoveryTableReadyPromise = null;
 let recoveryTransporterCache = undefined;
+
+// Función para forzar la recarga de la configuración SMTP
+function clearSmtpCache() {
+  recoveryTransporterCache = undefined;
+}
 
 function generateRecoveryCode() {
   return String(randomInt(0, 10 ** RECOVERY_CODE_LENGTH)).padStart(
@@ -165,8 +176,16 @@ function getRecoveryTransporter() {
   return recoveryTransporterCache;
 }
 
+function isProductionEnv() {
+  return String(process.env.NODE_ENV || "").trim().toLowerCase() === "production";
+}
+
 function allowConsoleEmailFallback() {
-  return String(process.env.EMAIL_FALLBACK_TO_CONSOLE || "false") === "true";
+  const raw = String(process.env.EMAIL_FALLBACK_TO_CONSOLE || "").trim().toLowerCase();
+  if (!raw) {
+    return !isProductionEnv();
+  }
+  return raw === "true" || raw === "1" || raw === "yes" || raw === "on";
 }
 
 function trimTrailingSlash(url) {
@@ -224,25 +243,37 @@ async function sendRecoveryCodeEmail({ email, code }) {
     return { delivered: false, devCode: code };
   }
 
-  await transporter.sendMail({
-    from: fromEmail,
-    to: email,
-    subject: "Codigo de recuperacion - VIREM",
-    text: `Tu codigo de recuperacion es: ${code}. Expira en ${RECOVERY_CODE_TTL_MINUTES} minutos.`,
-    html: `<p>Tu codigo de recuperacion es:</p><p><strong style="font-size:20px;letter-spacing:2px;">${code}</strong></p><p>Expira en ${RECOVERY_CODE_TTL_MINUTES} minutos.</p>`,
-  });
+  try {
+    await transporter.sendMail({
+      from: fromEmail,
+      to: email,
+      subject: "Codigo de recuperacion - VIREM",
+      text: `Tu codigo de recuperacion es: ${code}. Expira en ${RECOVERY_CODE_TTL_MINUTES} minutos.`,
+      html: `<p>Tu codigo de recuperacion es:</p><p><strong style="font-size:20px;letter-spacing:2px;">${code}</strong></p><p>Expira en ${RECOVERY_CODE_TTL_MINUTES} minutos.</p>`,
+    });
+  } catch (error) {
+    if (!allowConsoleEmailFallback()) {
+      throw error;
+    }
+
+    console.warn(
+      `[RECOVERY] Fallback local para ${email}: ${code} (${error?.message || "sendMail failed"})`
+    );
+    return { delivered: false, devCode: code };
+  }
 
   return { delivered: true };
 }
 
 async function sendEmailVerificationCodeEmail({ email, code }) {
+  const makeWebhookUrl = String(process.env.MAKE_WEBHOOK_URL || "").trim();
   const transporter = getRecoveryTransporter();
   const verificationLink = buildEmailVerificationLink(email, code);
   const fromEmail =
+    String(process.env.SMTP_USER || "").trim() ||
     String(process.env.VERIFICATION_EMAIL_FROM || "").trim() ||
     String(process.env.RECOVERY_EMAIL_FROM || "").trim() ||
     String(process.env.SMTP_FROM || "").trim() ||
-    String(process.env.SMTP_USER || "").trim() ||
     "no-reply@virem.local";
 
   if (!transporter) {
@@ -256,20 +287,90 @@ async function sendEmailVerificationCodeEmail({ email, code }) {
     return { delivered: false, devCode: code };
   }
 
-  await transporter.sendMail({
-    from: fromEmail,
-    to: email,
-    subject: "Verifica tu correo - VIREM",
-    text:
-      `Tu codigo de verificacion es: ${code}. ` +
-      `Expira en ${EMAIL_CODE_TTL_MINUTES} minutos.\n\n` +
-      `Tambien puedes verificar haciendo clic aqui:\n${verificationLink}`,
-    html:
-      `<p>Tu codigo de verificacion es:</p>` +
-      `<p><strong style=\"font-size:20px;letter-spacing:2px;\">${code}</strong></p>` +
-      `<p>Expira en ${EMAIL_CODE_TTL_MINUTES} minutos.</p>` +
-      `<p><a href=\"${verificationLink}\">Haz clic aqui para verificar tu correo</a></p>`,
-  });
+  // Si tenemos Webhook de Make, enviamos los datos allí primero
+  if (makeWebhookUrl) {
+    try {
+      await axios.post(makeWebhookUrl, {
+        type: 'verification_code',
+        email: email,
+        code: code,
+        verificationLink: verificationLink,
+        timestamp: new Date().toISOString()
+      });
+      console.log(`✅ Datos enviados a Make.com Webhook para ${email}`);
+      return { delivered: true };
+    } catch (makeError) {
+      console.error(`❌ Error enviando a Make.com: ${makeError.message}`);
+      // Si falla Make, intentamos seguir con SMTP normal si está configurado
+    }
+  }
+
+  try {
+    const htmlContent = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <style>
+          .container { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: 0 auto; padding: 40px; background-color: #f6fafd; border-radius: 24px; }
+          .white-box { background-color: #ffffff; padding: 40px; border-radius: 20px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); }
+          .logo { text-align: center; margin-bottom: 30px; }
+          .logo-text { font-size: 28px; font-weight: 800; color: #137fec; letter-spacing: 2px; }
+          .title { font-size: 24px; font-weight: 700; color: #0a1931; margin-bottom: 10px; text-align: center; }
+          .subtitle { font-size: 16px; color: #4a7fa7; margin-bottom: 30px; text-align: center; line-height: 1.5; }
+          .code-box { background-color: #f1f7ff; padding: 20px; border-radius: 16px; text-align: center; margin-bottom: 30px; border: 1px dashed #137fec; }
+          .code { font-size: 36px; font-weight: 800; color: #137fec; letter-spacing: 8px; margin: 0; }
+          .footer { font-size: 12px; color: #94a3b8; text-align: center; margin-top: 30px; }
+          .btn { display: inline-block; padding: 14px 28px; background-color: #137fec; color: #ffffff !important; text-decoration: none; border-radius: 12px; font-weight: 700; margin-top: 10px; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="logo">
+            <span class="logo-text">VIREM</span>
+          </div>
+          <div class="white-box">
+            <h1 class="title">Verifica tu correo</h1>
+            <p class="subtitle">¡Gracias por unirte a VIREM! Para completar tu registro, introduce el siguiente código en la aplicación:</p>
+            
+            <div class="code-box">
+              <h2 class="code">${code}</h2>
+            </div>
+            
+            <p class="subtitle" style="margin-bottom: 10px;">Este código expirará en ${EMAIL_CODE_TTL_MINUTES} minutos.</p>
+            
+            <div style="text-align: center; margin-top: 20px;">
+              <p style="font-size: 14px; color: #64748b;">Si prefieres, también puedes verificar haciendo clic aquí:</p>
+              <a href="${verificationLink}" class="btn">Verificar ahora</a>
+            </div>
+          </div>
+          <div class="footer">
+            &copy; 2026 VIREM - Plataforma Médica Integral.<br>
+            Si no solicitaste este código, puedes ignorar este correo.
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+
+    await transporter.sendMail({
+      from: fromEmail,
+      to: email,
+      subject: `Verifica tu cuenta en VIREM [${code}]`,
+      text: `Tu código de verificación de VIREM es: ${code}. Expira en ${EMAIL_CODE_TTL_MINUTES} minutos.`,
+      html: htmlContent,
+    });
+    console.log(`✅ Email de verificación enviado a ${email}`);
+  } catch (error) {
+    if (!allowConsoleEmailFallback()) {
+      throw error;
+    }
+
+    console.warn(
+      `[VERIFY] Fallback local para ${email}: ${code} (${error?.message || "sendMail failed"})`
+    );
+    return { delivered: false, devCode: code };
+  }
 
   return { delivered: true };
 }
@@ -841,165 +942,63 @@ async function buildAuthUserPayload(client, userRow) {
  * ===============================
  */
 router.post("/register", async (req, res) => {
-  const {
-    nombres,
-    apellidos,
-    fechanacimiento,
-    genero,
-    cedula,
-    telefono,
-    email,
-    password,
-  } = req.body;
-
-  if (
-    !nombres ||
-    !apellidos ||
-    !fechanacimiento ||
-    !genero ||
-    !cedula ||
-    !telefono ||
-    !email ||
-    !password
-  ) {
-    return res.status(400).json({
-      success: false,
-      message:
-        "Faltan campos obligatorios (nombres, apellidos, fechanacimiento, genero, cedula, telefono, email, password).",
-    });
-  }
-
-  const normalizedEmail = String(email || "")
-    .toLowerCase()
-    .trim();
-  if (!isValidEmail(normalizedEmail)) {
-    return res.status(400).json({
-      success: false,
-      message: "Debes enviar un correo valido.",
-    });
-  }
-  if (!isStrongPassword(password)) {
-    return res.status(400).json({
-      success: false,
-      message:
-        "La contrasena debe tener al menos 8 caracteres, mayuscula, minuscula, numero y simbolo.",
-    });
-  }
-
-  const requireEmailVerification =
-    String(process.env.REQUIRE_EMAIL_VERIFICATION || "true") === "true";
+  const { nombres, apellidos, fechanacimiento, genero, cedula, telefono, email, password } = req.body;
+  const normalizedEmail = String(email || "").toLowerCase().trim();
 
   const client = await pool.connect();
-  let verificationCodePayload = null;
-
   try {
-    await ensureRfCoreSchema();
-    const fechaSQL = toSqlDate(fechanacimiento);
-
     await client.query("BEGIN");
-
-    const existing = await client.query(
-      "SELECT usuarioid FROM usuario WHERE email = $1",
-      [normalizedEmail]
-    );
-
+    const existing = await client.query("SELECT usuarioid FROM usuario WHERE email = $1", [normalizedEmail]);
     if (existing.rows.length > 0) {
       await client.query("ROLLBACK");
-      return res.status(409).json({
-        success: false,
-        message: "Ese correo ya esta registrado.",
-      });
+      return res.status(409).json({ success: false, message: "Este correo ya está registrado." });
     }
 
-    const passwordhash = await bcrypt.hash(String(password), 10);
-    const rolid = Number(process.env.DEFAULT_ROLID || PACIENTE_ROLE_ID);
-    const activo = String(process.env.DEFAULT_ACTIVO || "true") === "true";
-    const accountStatus = requireEmailVerification
-      ? ACCOUNT_STATUS.PENDING_VERIFICATION
-      : ACCOUNT_STATUS.ACTIVE;
-    const emailVerificado = !requireEmailVerification;
-
-    const insertUsuario = await client.query(
-      `INSERT INTO usuario (
-         rolid,
-         email,
-         passwordhash,
-         fechacreacion,
-         activo,
-         account_status,
-         email_verificado,
-         email_verificado_at
-       )
-       VALUES ($1,$2,$3,NOW(),$4,$5,$6,CASE WHEN $6 THEN NOW() ELSE NULL END)
-       RETURNING usuarioid`,
-      [
-        rolid,
-        normalizedEmail,
-        passwordhash,
-        activo,
-        accountStatus,
-        emailVerificado,
-      ]
-    );
-
-    const usuarioid = insertUsuario.rows[0].usuarioid;
-
-    const insertPaciente = await insertPacienteCompatible({
-      client,
-      usuarioid,
-      nombres,
-      apellidos,
-      fechaSQL,
-      genero,
-      cedulaClean: String(cedula).replace(/\D/g, "").slice(0, 11),
-      telefonoClean: String(telefono).replace(/\D/g, "").slice(0, 11),
+    const bodyCompleto = { nombres, apellidos, fechanacimiento, genero, cedula, telefono, password };
+    const verification = await createPendingRegistration(client, {
+      email: normalizedEmail,
+      registrationData: bodyCompleto,
+      roleId: PACIENTE_ROLE_ID,
     });
-
-    if (requireEmailVerification) {
-      verificationCodePayload = await createEmailVerificationCode(client, {
-        usuarioid,
-        email: normalizedEmail,
-        ttlMinutes: EMAIL_CODE_TTL_MINUTES,
-      });
-    }
 
     await client.query("COMMIT");
-
-    let verificationDelivery = null;
-    if (verificationCodePayload) {
-      verificationDelivery = await sendEmailVerificationCodeEmail({
-        email: normalizedEmail,
-        code: verificationCodePayload.codigo,
-      });
+    let delivery = null;
+    try {
+      delivery = await sendEmailVerificationCodeEmail({ email: normalizedEmail, code: verification.codigo });
+    } catch (emailErr) {
+      console.error("⚠️ Error enviando email de verificación:", emailErr.message);
+      // No fallamos el registro completo si solo falló el envío del email, 
+      // pero informamos al usuario o logueamos el problema.
     }
 
-    return res.json({
+    return res.status(200).json({
       success: true,
-      message: requireEmailVerification
-        ? "Paciente registrado. Debes verificar tu correo para activar la cuenta."
-        : "Paciente registrado correctamente.",
-      pacienteid: insertPaciente?.pacienteid ?? null,
-      usuarioid,
-      accountStatus,
-      requiresEmailVerification: requireEmailVerification,
-      ...(verificationDelivery?.devCode
-        ? { devVerificationCode: verificationDelivery.devCode }
-        : {}),
+      message: "Código enviado. Verifícalo para completar tu registro.",
+      requiresEmailVerification: true,
+      ...(delivery?.devCode ? { devVerificationCode: delivery.devCode } : {}),
     });
   } catch (err) {
-    try {
-      await client.query("ROLLBACK");
-    } catch (_) {}
-
-    return res.status(500).json({
-      success: false,
+    if (client) {
+      try {
+        // Solo intentamos ROLLBACK si la conexión sigue abierta y no se ha hecho COMMIT
+        await client.query("ROLLBACK");
+      } catch (rbErr) {
+        // Silenciamos errores de rollback si la transacción ya terminó
+      }
+    }
+    console.error("❌ Error crítico en registro de paciente:", err);
+    return res.status(500).json({ 
+      success: false, 
       message: "Error interno registrando paciente.",
-      error: err?.message || String(err),
+      error: err.message, // Exponemos el mensaje para debug
+      stack: process.env.NODE_ENV === 'production' ? undefined : err.stack
     });
   } finally {
-    client.release();
+    if (client) client.release();
   }
 });
+
+
 
 /**
  * ===============================
@@ -1008,289 +1007,128 @@ router.post("/register", async (req, res) => {
  * ===============================
  */
 router.post("/register-medico", async (req, res) => {
-  const {
-    nombreCompleto,
-    fechanacimiento,
-    genero,
-    especialidad,
-    cedula,
-    telefono,
-    fotoUrl,
-    email,
-    password,
-    exequaturValidationToken,
-    documentos,
-  } = req.body;
+  const { nombreCompleto, fechanacimiento, genero, especialidad, cedula, telefono, fotoUrl, email, password, documentos, exequaturValidationToken } = req.body;
+  const normalizedEmail = String(email || "").toLowerCase().trim();
 
-  if (
-    !nombreCompleto ||
-    !fechanacimiento ||
-    !genero ||
-    !especialidad ||
-    !cedula ||
-    !telefono ||
-    !email ||
-    !password
-  ) {
-    return res.status(400).json({
-      success: false,
-      message:
-        "Faltan campos obligatorios (nombreCompleto, fechanacimiento, genero, especialidad, cedula, telefono, email, password).",
-    });
-  }
-
-  const normalizedEmail = String(email || "")
-    .toLowerCase()
-    .trim();
-  if (!isValidEmail(normalizedEmail)) {
-    return res.status(400).json({
-      success: false,
-      message: "Debes enviar un correo valido.",
-    });
-  }
-  if (!isStrongPassword(password)) {
-    return res.status(400).json({
-      success: false,
-      message:
-        "La contrasena debe tener al menos 8 caracteres, mayuscula, minuscula, numero y simbolo.",
-    });
-  }
-
-  const requireDoctorDocuments =
-    String(process.env.REQUIRE_DOCTOR_DOCUMENTS || "true") === "true";
-  const docsRaw = documentos && typeof documentos === "object" ? documentos : {};
-  const cedulaProfesionalUrl = String(
-    docsRaw.cedulaProfesionalUrl || docsRaw.cedulaUrl || ""
-  ).trim();
-  const certificadoEspecialidadUrl = String(
-    docsRaw.certificadoEspecialidadUrl ||
-      docsRaw.especialidadUrl ||
-      docsRaw.tituloEspecialidadUrl ||
-      ""
-  ).trim();
-
-  if (
-    requireDoctorDocuments &&
-    (!cedulaProfesionalUrl || !certificadoEspecialidadUrl)
-  ) {
-    return res.status(400).json({
-      success: false,
-      message:
-        "Debes subir cedula profesional y documento de especialidad para continuar.",
-    });
-  }
-
-  const allDocumentUrls = [cedulaProfesionalUrl, certificadoEspecialidadUrl].filter(
-    Boolean
-  );
-  const invalidDocument = allDocumentUrls.find((url) => {
-    if (url.length > MAX_PHOTO_URL_LENGTH) return true;
-    return !isSupportedImageUri(url);
-  });
-  if (invalidDocument) {
-    return res.status(400).json({
-      success: false,
-      message:
-        "Los documentos deben ser URLs/URIs de imagen validas (http/https/file/data:image).",
-    });
-  }
-
-  let client;
-
+  const client = await pool.connect();
   try {
-    await ensureRfCoreSchema();
-    const fechaSQL = toSqlDate(fechanacimiento);
-    const nombreCompletoTrim = String(nombreCompleto).replace(/\s+/g, " ").trim();
-    const cedulaClean = String(cedula).replace(/\D/g, "").slice(0, 11);
-    const telefonoClean = normalizePhone(telefono);
-    const especialidadTrim = String(especialidad).trim();
-    const fotoUrlTrim = String(fotoUrl || "").trim();
-
-    if (fotoUrlTrim.length > MAX_PHOTO_URL_LENGTH) {
-      return res.status(400).json({
-        success: false,
-        message: `fotoUrl supera ${MAX_PHOTO_URL_LENGTH} caracteres.`,
-      });
-    }
-
-    if (!isSupportedImageUri(fotoUrlTrim || null)) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "fotoUrl debe iniciar con http://, https://, file:// o data:image/.",
-      });
-    }
-
-    const tokenRaw = String(exequaturValidationToken || "").trim();
-    let exequaturValidatedByToken = false;
-
-    if (tokenRaw && process.env.JWT_SECRET) {
-      try {
-        const payload = jwt.verify(tokenRaw, process.env.JWT_SECRET);
-        const tokenScope = String(payload?.scope || "");
-        const tokenExists = Boolean(payload?.exists);
-        const tokenName = String(payload?.nombreCompleto || "")
-          .replace(/\s+/g, " ")
-          .trim();
-
-        if (
-          tokenScope === "exequatur-validation" &&
-          tokenExists &&
-          tokenName &&
-          tokenName.localeCompare(nombreCompletoTrim, "es", { sensitivity: "base" }) === 0
-        ) {
-          exequaturValidatedByToken = true;
-        }
-      } catch (_) {}
-    }
-
-    let exequaturResult = { ok: true, exists: true };
-    if (!exequaturValidatedByToken) {
-      exequaturResult = await consultarExequaturSNS({
-        nombreCompleto: nombreCompletoTrim,
-      });
-    }
-
-    if (!exequaturResult.ok) {
-      const statusCode = exequaturResult.serviceUnavailable ? 503 : 400;
-      return res.status(statusCode).json({
-        success: false,
-        serviceUnavailable: Boolean(exequaturResult.serviceUnavailable),
-        message:
-          exequaturResult.reason ||
-          "No se pudo validar el Exequatur del SNS. Intenta nuevamente.",
-      });
-    }
-
-    if (!exequaturResult.exists) {
-      const suggestedName = String(exequaturResult?.match?.candidateName || "").trim();
-      const suggestedMessage = suggestedName
-        ? ` Nombre similar encontrado: ${suggestedName}.`
-        : "";
-
-      return res.status(400).json({
-        success: false,
-        message: `El nombre del medico no aparece en el Exequatur del SNS.${suggestedMessage}`,
-      });
-    }
-
-    client = await pool.connect();
     await client.query("BEGIN");
-
-    const existing = await client.query(
-      "SELECT usuarioid FROM usuario WHERE email = $1",
-      [normalizedEmail]
-    );
-
+    const existing = await client.query("SELECT usuarioid FROM usuario WHERE email = $1", [normalizedEmail]);
     if (existing.rows.length > 0) {
       await client.query("ROLLBACK");
-      return res.status(409).json({
-        success: false,
-        message: "Ese correo ya está registrado.",
-      });
+      return res.status(409).json({ success: false, message: "Este correo ya está registrado." });
     }
 
-    const passwordhash = await bcrypt.hash(String(password), 10);
-    const rolid = Number(process.env.DEFAULT_MEDICO_ROLID || MEDICO_ROLE_ID);
-    const activo = String(process.env.DEFAULT_ACTIVO || "true") === "true";
-    const accountStatus = ACCOUNT_STATUS.PENDING_APPROVAL;
-    const emailVerificado = true;
-
-    const insertUsuario = await client.query(
-      `INSERT INTO usuario (
-         rolid,
-         email,
-         passwordhash,
-         fechacreacion,
-         activo,
-         account_status,
-         email_verificado,
-         email_verificado_at,
-         aprobado_por_admin
-       )
-       VALUES ($1,$2,$3,NOW(),$4,$5,$6,CASE WHEN $6 THEN NOW() ELSE NULL END,FALSE)
-       RETURNING usuarioid`,
-      [
-        rolid,
-        normalizedEmail,
-        passwordhash,
-        activo,
-        accountStatus,
-        emailVerificado,
-      ]
-    );
-
-    const usuarioid = insertUsuario.rows[0].usuarioid;
-    const medicoRow = await insertMedicoCompatible({
-      client,
-      usuarioid,
-      nombreCompletoTrim,
-      fechaSQL,
-      genero,
-      cedulaClean,
-      telefonoClean,
-      especialidadTrim,
+    const bodyCompleto = { nombreCompleto, fechanacimiento, genero, especialidad, cedula, telefono, fotoUrl, password, documentos, exequaturValidationToken };
+    const verification = await createPendingRegistration(client, {
+      email: normalizedEmail,
+      registrationData: bodyCompleto,
+      roleId: MEDICO_ROLE_ID,
     });
 
-    const profilePatch = {
-      meta: {
-        nombreCompleto: nombreCompletoTrim,
-        especialidad: especialidadTrim,
-        cedula: cedulaClean,
-        telefono: telefonoClean,
-        genero: String(genero || "").trim(),
-        fechanacimiento: fechaSQL,
-      },
-    };
-    if (fotoUrlTrim) profilePatch.fotoUrl = fotoUrlTrim;
-    await upsertUserProfileById(client, usuarioid, profilePatch);
-
-    if (cedulaProfesionalUrl) {
-      await saveMedicoDocument(client, {
-        usuarioid,
-        medicoid: String(medicoRow.medicoid || ""),
-        tipo: "cedula_profesional",
-        nombre: "Cedula profesional",
-        archivoUrl: cedulaProfesionalUrl,
-      });
-    }
-    if (certificadoEspecialidadUrl) {
-      await saveMedicoDocument(client, {
-        usuarioid,
-        medicoid: String(medicoRow.medicoid || ""),
-        tipo: "certificado_especialidad",
-        nombre: "Certificado de especialidad",
-        archivoUrl: certificadoEspecialidadUrl,
-      });
-    }
-
     await client.query("COMMIT");
+    let delivery = null;
+    try {
+      delivery = await sendEmailVerificationCodeEmail({ email: normalizedEmail, code: verification.codigo });
+    } catch (emailErr) {
+      console.error("⚠️ Error enviando email de verificación (médico):", emailErr.message);
+    }
 
-    return res.status(201).json({
+    return res.status(200).json({
       success: true,
-      message:
-        "Medico registrado correctamente. Tu cuenta queda pendiente de aprobacion administrativa.",
-      medico: medicoRow,
-      usuarioid,
-      accountStatus,
-      requiresAdminApproval: true,
+      message: "Código enviado. Verifícalo para completar tu registro profesional.",
+      requiresEmailVerification: true,
+      ...(delivery?.devCode ? { devVerificationCode: delivery.devCode } : {}),
     });
   } catch (err) {
     if (client) {
       try {
         await client.query("ROLLBACK");
-      } catch (_) {}
+      } catch (rbErr) {}
     }
-
-    return res.status(500).json({
-      success: false,
+    console.error("❌ Error crítico en registro de médico:", err);
+    return res.status(500).json({ 
+      success: false, 
       message: "Error interno registrando médico.",
-      error: err?.message || String(err),
+      error: process.env.NODE_ENV === 'production' ? undefined : err.message
     });
   } finally {
     if (client) client.release();
   }
 });
+
+router.post("/register/confirm", async (req, res) => {
+  const { email, codigo } = req.body;
+  const normalizedEmail = String(email || "").toLowerCase().trim();
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const verif = await verifyPendingRegistration(client, { email: normalizedEmail, codigo });
+    if (!verif.ok) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ success: false, message: verif.message });
+    }
+
+    const { roleId, registrationData, pendingId } = verif;
+    const body = registrationData;
+    let usuarioid = null;
+
+    if (roleId === MEDICO_ROLE_ID) {
+      const passwordhash = await bcrypt.hash(String(body.password), 10);
+      const ins = await client.query(
+        `INSERT INTO usuario (rolid, email, passwordhash, fechacreacion, activo, account_status, email_verificado, email_verificado_at, aprobado_por_admin)
+         VALUES ($1,$2,$3,NOW(),TRUE,'pendiente_aprobacion',TRUE,NOW(),FALSE)
+         RETURNING usuarioid`,
+        [roleId, normalizedEmail, passwordhash]
+      );
+      usuarioid = ins.rows[0].usuarioid;
+      const medico = await insertMedicoCompatible({
+        client, usuarioid,
+        nombreCompletoTrim: body.nombreCompleto,
+        fechaSQL: toSqlDate(body.fechanacimiento),
+        genero: body.genero,
+        cedulaClean: body.cedula,
+        telefonoClean: body.telefono,
+        especialidadTrim: body.especialidad
+      });
+      await upsertUserProfileById(client, usuarioid, {
+        meta: { nombreCompleto: body.nombreCompleto, especialidad: body.especialidad, cedula: body.cedula, telefono: body.telefono, genero: body.genero, fechanacimiento: body.fechanacimiento },
+        fotoUrl: body.fotoUrl
+      });
+      if (body.documentos?.cedulaProfesionalUrl) {
+        await saveMedicoDocument(client, { usuarioid, medicoid: String(medico.medicoid || ""), tipo: "cedula_profesional", nombre: "Cédula profesional", archivoUrl: body.documentos.cedulaProfesionalUrl });
+      }
+      if (body.documentos?.certificadoEspecialidadUrl) {
+        await saveMedicoDocument(client, { usuarioid, medicoid: String(medico.medicoid || ""), tipo: "certificado_especialidad", nombre: "Certificado de especialidad", archivoUrl: body.documentos.certificadoEspecialidadUrl });
+      }
+    } else {
+      const passwordhash = await bcrypt.hash(String(body.password), 10);
+      const ins = await client.query(
+        `INSERT INTO usuario (rolid, email, passwordhash, fechacreacion, activo, account_status, email_verificado, email_verificado_at)
+         VALUES ($1,$2,$3,NOW(),TRUE,'activa',TRUE,NOW())
+         RETURNING usuarioid`,
+        [roleId, normalizedEmail, passwordhash]
+      );
+      usuarioid = ins.rows[0].usuarioid;
+      await client.query(
+        `INSERT INTO paciente (usuarioid, nombres, apellidos, fechanacimiento, genero, cedula, telefono)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        [usuarioid, body.nombres, body.apellidos, toSqlDate(body.fechanacimiento), body.genero, body.cedula, body.telefono]
+      );
+    }
+
+    await deletePendingRegistration(client, pendingId);
+    await client.query("COMMIT");
+    return res.status(201).json({ success: true, message: "Registro completado con éxito.", usuarioid });
+  } catch (err) {
+    if (client) await client.query("ROLLBACK");
+    console.error("Error confirming registration:", err);
+    return res.status(500).json({ success: false, message: "Error al crear la cuenta." });
+  } finally {
+    if (client) client.release();
+  }
+});
+
 
 function renderEmailVerificationPage({
   title,
@@ -2034,6 +1872,133 @@ router.get("/me", requireAuth, async (req, res) => {
     return res.status(500).json({ success: false, message: "Error interno obteniendo perfil." });
   } finally {
     if (client) client.release();
+  }
+});
+
+/**
+ * ===============================
+ * POST /api/auth/resend-verification-pending
+ * Reenvia codigo para registro pendiente
+ * ===============================
+ */
+router.post("/resend-verification-pending", async (req, res) => {
+  const email = String(req.body?.email || "")
+    .toLowerCase()
+    .trim();
+
+  if (!isValidEmail(email)) {
+    return res.status(400).json({
+      success: false,
+      message: "Correo inválido.",
+    });
+  }
+
+  let client;
+  try {
+    await ensureRfCoreSchema();
+    client = await pool.connect();
+
+    const pendingResult = await client.query(
+      `SELECT id, registration_data, role_id, verification_code_hash, expires_at
+       FROM pending_registration
+       WHERE email = $1
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [email]
+    );
+
+    if (!pendingResult.rows.length) {
+      return res.json({
+        success: true,
+        message: "Si existe un registro pendiente, te enviaremos un nuevo código.",
+      });
+    }
+
+    const row = pendingResult.rows[0];
+    const expiresAt = new Date(row.expires_at).getTime();
+    const nowMs = Date.now();
+
+    // Verificar si el registro pendiente aún es válido
+    if (expiresAt <= nowMs) {
+      await client.query("DELETE FROM pending_registration WHERE id = $1", [row.id]);
+      return res.json({
+        success: true,
+        message: "Si existe un registro pendiente, te enviaremos un nuevo código.",
+      });
+    }
+
+    // Generar nuevo código
+    const newCode = generateEmailVerificationCode();
+    const normalizedEmail = normalizeComparableText(email).toLowerCase();
+    const newCodeHash = hashEmailVerificationCode(normalizedEmail, newCode);
+
+    await client.query(
+      `UPDATE pending_registration
+       SET verification_code_hash = $1, created_at = NOW()
+       WHERE id = $2`,
+      [newCodeHash, row.id]
+    );
+
+    const delivery = await sendEmailVerificationCodeEmail({
+      email,
+      code: newCode,
+    });
+
+    return res.json({
+      success: true,
+      message: "Se envió un nuevo código de verificación.",
+      ...(delivery?.devCode ? { devVerificationCode: delivery.devCode } : {}),
+    });
+  } catch (err) {
+    console.error("Error resend-verification-pending:", err);
+    return res.status(500).json({
+      success: false,
+      message: "No se pudo reenviar el código.",
+      error: err?.message || String(err),
+    });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+
+/**
+ * RUTA DE DIAGNÓSTICO: Envía un correo de prueba usando la config actual.
+ * Acceso: http://localhost:3000/api/auth/debug-email
+ */
+router.get("/debug-email", async (req, res) => {
+  clearSmtpCache(); // Forzamos recarga de .env
+  const testEmail = req.query.email || process.env.SMTP_USER;
+  
+  try {
+    console.log(`[DEBUG] Iniciando prueba de correo para: ${testEmail}...`);
+    const result = await sendEmailVerificationCodeEmail({ 
+      email: testEmail, 
+      code: "123456" 
+    });
+    
+    if (result.delivered) {
+      return res.status(200).send(`
+        <h1>✅ ¡Éxito!</h1>
+        <p>El correo fue enviado (o los datos se enviaron a <b>Make.com</b>) correctamente para <b>${testEmail}</b>.</p>
+        <p>Revisa tu bandeja de entrada o tu escenario en Make.</p>
+      `);
+    } else {
+      return res.status(200).send(`
+        <h1>⚠️ Modo Fallback</h1>
+        <p>El correo no se envió, pero el servidor está en modo "Consola".</p>
+        <p>El código generado fue: <b>${result.devCode}</b> (mira la terminal del backend).</p>
+      `);
+    }
+  } catch (err) {
+    console.error("[DEBUG] Error en debug-email:", err);
+    return res.status(500).send(`
+      <h1>❌ Error de Envío</h1>
+      <p>Ocurrió un error técnico:</p>
+      <pre>${err.message}</pre>
+      <hr>
+      <p>Verifica que tu App Password de Gmail sea correcta y que el puerto sea 465.</p>
+    `);
   }
 });
 

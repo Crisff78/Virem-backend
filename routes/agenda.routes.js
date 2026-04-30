@@ -94,18 +94,7 @@ async function fetchConversationForContext(client, { conversacionId, context, lo
   return result.rows[0] || null;
 }
 
-router.use(async (_req, res, next) => {
-  try {
-    await ensurePlatformSchema();
-    return next();
-  } catch (err) {
-    console.error("Error inicializando esquema platform:", err);
-    return res.status(500).json({
-      success: false,
-      message: "No se pudo preparar el esquema de plataforma.",
-    });
-  }
-});
+// Schema is now initialized at startup in index.js
 
 router.get("/catalogos/especialidades", requireAuth, async (_req, res) => {
   try {
@@ -687,6 +676,169 @@ router.patch("/medico/me/disponibilidades/:id/bloquear", requireAuth, async (req
   }
 });
 
+router.post("/medico/me/disponibilidades/recurrente", requireAuth, async (req, res) => {
+  const { pattern, modalidad, slotMinutos, daysCount = 30 } = req.body;
+  console.log("[RECURRENTE] Generando con patron:", JSON.stringify(pattern));
+  
+  if (!Array.isArray(pattern) || pattern.length === 0) {
+    return res.status(400).json({ success: false, message: "Debe enviar un patron de horarios valido." });
+  }
+
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query("BEGIN");
+
+    const context = await resolveUserContext(client, req.user);
+    if (context.error || context.roleId !== MEDICO_ROLE_ID) {
+      await client.query("ROLLBACK");
+      return res.status(403).json({ success: false, message: "No autorizado." });
+    }
+
+    const medicoId = String(context.medico.medicoid);
+
+    // CLEANUP: Delete unbooked slots for the next 30 days to prevent duplicates (the "8:00 loop")
+    // We only delete slots that don't have a related appointment (cita)
+    await client.query(
+      `DELETE FROM horario_disponible 
+       WHERE medicoid::text = $1::text 
+         AND fechainicio >= NOW() 
+         AND fechainicio <= NOW() + INTERVAL '31 days'
+         AND horariodisponibleid NOT IN (SELECT horariodisponibleid FROM cita WHERE horariodisponibleid IS NOT NULL)`,
+      [medicoId]
+    );
+
+    // Save the pattern for future use
+    await client.query(
+      `INSERT INTO medico_horario_recurrente (medicoid, pattern, modalidad, slot_minutos, updated_at)
+       VALUES ($1::uuid, $2, $3, $4, NOW())
+       ON CONFLICT (medicoid) DO UPDATE 
+       SET pattern = $2, modalidad = $3, slot_minutos = $4, updated_at = NOW()`,
+      [medicoId, JSON.stringify(pattern), modalidad, parseInt(slotMinutos, 10) || 30]
+    );
+
+    const especialidadRow = await resolveEspecialidad(client, {
+      medicoId: context.medico.medicoid,
+    });
+    
+    // Safety check: if no specialty found, we use a fallback or return error
+    const especialidadId = especialidadRow ? Number(especialidadRow.especialidadid) : null;
+    
+    const zonaHorariaId = await resolveZonaHorariaId(client);
+    
+    const slotsCreated = [];
+    const now = new Date();
+    
+    for (let i = 0; i < daysCount; i++) {
+      const currentDay = new Date();
+      currentDay.setDate(now.getDate() + i);
+      const dayOfWeek = currentDay.getDay(); 
+      
+      const dayConfig = pattern.find(p => p.dayOfWeek === dayOfWeek);
+      if (dayConfig) {
+        // Generar fecha local YYYY-MM-DD para evitar desfases de toISOString()
+        const year = currentDay.getFullYear();
+        const month = String(currentDay.getMonth() + 1).padStart(2, '0');
+        const day = String(currentDay.getDate()).padStart(2, '0');
+        const dateStr = `${year}-${month}-${day}`;
+        
+        const start = new Date(`${dateStr}T${dayConfig.start}:00`);
+        const end = new Date(`${dateStr}T${dayConfig.end}:00`);
+        
+        if (start < end && !Number.isNaN(start.getTime()) && !Number.isNaN(end.getTime())) {
+          const insert = await client.query(
+            `INSERT INTO horario_disponible (
+               medicoid, zonahorariaid, fechainicio, fechafin, activo, 
+               especialidadid, modalidad, slot_minutos, bloqueado, updated_at
+             )
+             VALUES ($1::uuid, $2, $3::timestamptz, $4::timestamptz, TRUE, $5, $6, $7, FALSE, NOW())
+             RETURNING horariodisponibleid`,
+            [
+              medicoId,
+              zonaHorariaId,
+              start.toISOString(),
+              end.toISOString(),
+              especialidadId, // Can be null if not found
+              normalizeModalidad(modalidad || dayConfig.modalidad, "ambas"),
+              clampInt(slotMinutos || dayConfig.slotMinutos, 15, 60, 30)
+            ]
+          );
+          slotsCreated.push(insert.rows[0].horariodisponibleid);
+        }
+      }
+    }
+
+    await client.query("COMMIT");
+    return res.status(201).json({ success: true, createdCount: slotsCreated.length });
+  } catch (err) {
+    if (client) await client.query("ROLLBACK");
+    console.error("Error POST /agenda/medico/me/disponibilidades/recurrente:", err);
+    return res.status(500).json({ 
+      success: false, 
+      message: "Error generando disponibilidad recurrente.",
+      error: err.message 
+    });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+router.get("/medico/me/recurrente-config", requireAuth, async (req, res) => {
+  let client;
+  try {
+    client = await pool.connect();
+    const context = await resolveUserContext(client, req.user);
+    if (context.error || context.roleId !== MEDICO_ROLE_ID) {
+      return res.status(403).json({ success: false, message: "No autorizado." });
+    }
+
+    const result = await client.query(
+      `SELECT pattern, modalidad, slot_minutos AS "slotMinutos"
+       FROM medico_horario_recurrente
+       WHERE medicoid::text = $1::text`,
+      [String(context.medico.medicoid)]
+    );
+
+    if (result.rows.length === 0) {
+      return res.json({ success: true, config: null });
+    }
+
+    return res.json({ success: true, config: result.rows[0] });
+  } catch (err) {
+    console.error("Error GET /agenda/medico/me/recurrente-config:", err);
+    return res.status(500).json({ success: false, message: "Error obteniendo configuración recurrente." });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+router.post("/medico/me/recurrente-config", requireAuth, async (req, res) => {
+  const { pattern, modalidad, slotMinutos } = req.body;
+  let client;
+  try {
+    client = await pool.connect();
+    const context = await resolveUserContext(client, req.user);
+    if (context.error || context.roleId !== MEDICO_ROLE_ID) {
+      return res.status(403).json({ success: false, message: "No autorizado." });
+    }
+
+    await client.query(
+      `INSERT INTO medico_horario_recurrente (medicoid, pattern, modalidad, slot_minutos, updated_at)
+       VALUES ($1::uuid, $2, $3, $4, NOW())
+       ON CONFLICT (medicoid) DO UPDATE 
+       SET pattern = $2, modalidad = $3, slot_minutos = $4, updated_at = NOW()`,
+      [String(context.medico.medicoid), JSON.stringify(pattern), modalidad, parseInt(slotMinutos, 10) || 30]
+    );
+
+    return res.json({ success: true, message: "Configuración guardada correctamente." });
+  } catch (err) {
+    console.error("Error POST /agenda/medico/me/recurrente-config:", err);
+    return res.status(500).json({ success: false, message: "Error guardando configuración recurrente." });
+  } finally {
+    if (client) client.release();
+  }
+});
+
 router.get("/me/citas", requireAuth, async (req, res) => {
   const result = await listMyCitas({
     reqUser: req.user,
@@ -1238,6 +1390,7 @@ router.get("/me/citas/:citaId/video-sala", requireAuth, async (req, res) => {
             openedAt: sala.opened_at || null,
             closedAt: sala.closed_at || null,
             canJoin,
+            jitsiDomain: normalizeText(process.env.JITSI_BASE_URL || "meet.jit.si").replace(/^https?:\/\//, ""),
           }
         : null,
     });
@@ -1377,6 +1530,7 @@ router.post("/me/citas/:citaId/video-sala/abrir", requireAuth, async (req, res) 
             openedAt: sala.opened_at || null,
             closedAt: sala.closed_at || null,
             canJoin: doctorCanJoin,
+            jitsiDomain: normalizeText(process.env.JITSI_BASE_URL || "meet.jit.si").replace(/^https?:\/\//, ""),
           }
         : null,
     });

@@ -161,6 +161,12 @@ function sanitizeMedicoForAudience(row, actor, options = {}) {
     fotoUrl: isSupportedImageUri(row?.fotoUrl || null)
       ? String(row?.fotoUrl || "").trim() || null
       : null,
+    precio: Number(row?.precio || 0),
+    precio_chat: Number(row?.precio_chat || 0),
+    precio_videollamada: Number(row?.precio_videollamada || 0),
+    tipoPlan: String(row?.tipo_plan || 'comision'),
+    comisionPorcentaje: Number(row?.comision_porcentaje || 10),
+    membresiaActiva: Boolean(row?.membresia_activa),
     fecharegistro: row?.fecharegistro || null,
   };
 }
@@ -234,7 +240,7 @@ router.get("/", requireAuth, async (req, res) => {
            AND h.fechafin > NOW()
          GROUP BY h.medicoid::text
        )
-       SELECT
+       SELECT DISTINCT ON (COALESCE(NULLIF(m.cedula,''), m.medicoid::text))
          m.medicoid::text AS "medicoid",
          m.nombrecompleto AS "nombreCompleto",
          m.usuarioid,
@@ -250,7 +256,8 @@ router.get("/", requireAuth, async (req, res) => {
          COALESCE(rv.rating_promedio, 0) AS "ratingPromedio",
          COALESCE(rv.total_valoraciones, 0) AS "totalValoraciones",
          ns.proximo_horario AS "proximoHorarioDisponible",
-         mp.foto_url AS "fotoUrl",
+         COALESCE(mp.foto_url) AS "fotoUrl",
+         m.precio,
          m.fecharegistro
        FROM medico m
        LEFT JOIN especialidad e ON e.especialidadid = m.especialidadid
@@ -260,11 +267,13 @@ router.get("/", requireAuth, async (req, res) => {
           SELECT up.foto_url
           FROM usuario_perfil up
           WHERE up.usuarioid::text = m.usuarioid::text
+            AND up.foto_url IS NOT NULL
+            AND up.foto_url <> ''
           ORDER BY up.updated_at DESC
           LIMIT 1
         ) mp ON TRUE
        ${whereClause}
-       ORDER BY m.fecharegistro DESC, m.medicoid DESC`
+       ORDER BY COALESCE(NULLIF(m.cedula,''), m.medicoid::text), m.fecharegistro DESC, m.medicoid DESC`
       ,
       params
     );
@@ -362,6 +371,9 @@ router.get("/:id", requireAuth, async (req, res) => {
          COALESCE(rv.total_valoraciones, 0) AS "totalValoraciones",
          ns.proximo_horario AS "proximoHorarioDisponible",
          mp.foto_url AS "fotoUrl",
+         m.precio,
+         m.precio_chat,
+         m.precio_videollamada,
          m.fecharegistro
        FROM medico m
        LEFT JOIN especialidad e ON e.especialidadid = m.especialidadid
@@ -371,6 +383,8 @@ router.get("/:id", requireAuth, async (req, res) => {
           SELECT up.foto_url
           FROM usuario_perfil up
           WHERE up.usuarioid::text = m.usuarioid::text
+            AND up.foto_url IS NOT NULL
+            AND up.foto_url <> ''
           ORDER BY up.updated_at DESC
           LIMIT 1
         ) mp ON TRUE
@@ -487,6 +501,9 @@ router.put(
     telefono,
     especialidad,
     consultorio,
+    precio,
+    precio_chat,
+    precio_videollamada,
   } = req.body;
 
   const nombreCompletoTrim = String(nombreCompleto || "").replace(/\s+/g, " ").trim();
@@ -521,8 +538,11 @@ router.put(
            cedula = $4,
            telefono = $5,
            especialidadid = $6,
-           consultorio = $7
-       WHERE medicoid::text = $8::text
+           consultorio = $7,
+           precio = $8,
+           precio_chat = $9,
+           precio_videollamada = $10
+       WHERE medicoid::text = $11::text
        RETURNING
          medicoid::text AS "medicoid",
          nombrecompleto AS "nombreCompleto",
@@ -532,6 +552,9 @@ router.put(
          telefono,
          consultorio,
          especialidadid,
+         precio,
+         precio_chat,
+         precio_videollamada,
          fecharegistro`,
       [
         nombreCompletoTrim,
@@ -541,6 +564,9 @@ router.put(
         telefonoClean,
         especialidadid,
         consultorioTrim,
+        Number(precio || 1000),
+        Number(precio_chat || 500),
+        Number(precio_videollamada || 1000),
         String(req.params.id),
       ]
     );
@@ -586,6 +612,207 @@ router.delete("/:id", requireAuth, requireRole(ADMIN_ROLE_ID), async (req, res) 
   } catch (err) {
     console.error("Error DELETE /medicos/:id:", err);
     return res.status(500).json({ success: false, message: "Error interno eliminando medico." });
+  }
+});
+
+// ===============================
+// GET /api/medicos/me/finanzas
+// Finanzas personales del médico autenticado
+// ===============================
+router.get("/me/finanzas", requireAuth, async (req, res) => {
+  let client;
+  try {
+    client = await pool.connect();
+
+    // Verificar que sea un médico
+    const usuarioResult = await client.query(
+      `SELECT u.usuarioid, u.rolid, m.medicoid::text AS medicoid
+       FROM usuario u
+       LEFT JOIN medico m ON m.usuarioid = u.usuarioid
+       WHERE u.usuarioid = $1
+       LIMIT 1`,
+      [Number(req.user?.usuarioid || 0)]
+    );
+
+    if (!usuarioResult.rows.length) {
+      return res.status(404).json({ success: false, message: "Usuario no encontrado." });
+    }
+
+    const usuario = usuarioResult.rows[0];
+    if (Number(usuario.rolid) !== 2 || !usuario.medicoid) {
+      return res.status(403).json({
+        success: false,
+        message: "Este endpoint es solo para médicos.",
+      });
+    }
+
+    const medicoid = usuario.medicoid;
+    const currentMonth = new Date();
+    const monthStart = new Date(currentMonth.getFullYear(), currentMonth.getMonth(), 1);
+    const monthEnd = new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1, 0);
+
+    const prevMonth = new Date(currentMonth.getFullYear(), currentMonth.getMonth() - 1, 1);
+    const prevMonthEnd = new Date(currentMonth.getFullYear(), currentMonth.getMonth(), 0);
+
+    const [
+      infoMedico,
+      citasMesActual,
+      ingresosMesActual,
+      ingresosMesAnterior,
+      transacciones,
+    ] = await Promise.all([
+      // Info básica del médico
+      client.query(
+        `SELECT 
+           m.medicoid::text AS medicoid,
+           m.nombrecompleto,
+           m.tipo_plan,
+           m.comision_porcentaje,
+           m.membresia_activa,
+           m.membresia_monto,
+           m.precio,
+           m.precio_videollamada
+         FROM medico m
+         WHERE m.medicoid::text = $1`,
+        [medicoid]
+      ),
+      // Citas este mes
+      client.query(
+        `SELECT 
+           COUNT(*)::int AS total_citas,
+           COUNT(*) FILTER (WHERE estado_codigo = 'completada')::int AS completadas,
+           COUNT(*) FILTER (WHERE estado_codigo = 'confirmada')::int AS confirmadas,
+           COUNT(*) FILTER (WHERE lower(modalidad) = 'virtual')::int AS virtuales
+         FROM cita
+         WHERE medicoid::text = $1
+           AND DATE_TRUNC('month', fechahorainicio) = DATE_TRUNC('month', $2)`,
+        [medicoid, monthStart]
+      ),
+      // Ingresos este mes
+      client.query(
+        `SELECT 
+           COALESCE(SUM(monto_medico), 0)::numeric(14,2) AS monto_total,
+           COALESCE(SUM(monto_plataforma), 0)::numeric(14,2) AS comision_virem,
+           COALESCE(SUM(precio), 0)::numeric(14,2) AS monto_citas,
+           COUNT(*)::int AS citas_pagadas
+         FROM cita
+         WHERE medicoid::text = $1
+           AND DATE_TRUNC('month', fechahorainicio) = DATE_TRUNC('month', $2)
+           AND estado_codigo IN ('completada', 'confirmada')
+           AND precio > 0`,
+        [medicoid, monthStart]
+      ),
+      // Ingresos mes anterior
+      client.query(
+        `SELECT 
+           COALESCE(SUM(monto_medico), 0)::numeric(14,2) AS monto_total
+         FROM cita
+         WHERE medicoid::text = $1
+           AND DATE_TRUNC('month', fechahorainicio) = DATE_TRUNC('month', $2)
+           AND estado_codigo IN ('completada', 'confirmada')
+           AND precio > 0`,
+        [medicoid, prevMonth]
+      ),
+      // Últimas transacciones
+      client.query(
+        `SELECT 
+           c.citaid::text AS citaid,
+           c.fechahorainicio,
+           c.precio,
+           c.monto_medico,
+           c.monto_plataforma,
+           COALESCE(p.nombres, '') || ' ' || COALESCE(p.apellidos, '') AS paciente_nombre,
+           c.estado_codigo,
+           c.modalidad
+         FROM cita c
+         JOIN paciente p ON p.pacienteid = c.pacienteid
+         WHERE c.medicoid::text = $1
+         ORDER BY c.fechahorainicio DESC
+         LIMIT 20`,
+        [medicoid]
+      ),
+    ]);
+
+    const medico = infoMedico.rows[0];
+    const citas = citasMesActual.rows[0] || {};
+    const ingresos = ingresosMesActual.rows[0] || {};
+    const ingresosPrev = ingresosMesAnterior.rows[0] || {};
+
+    const toMoney = (val) => {
+      const parsed = Number(val || 0);
+      return Number.isFinite(parsed) ? Math.round(parsed * 100) / 100 : 0;
+    };
+
+    const montoEsteMes = toMoney(ingresos.monto_total);
+    const montoMesAnterior = toMoney(ingresosPrev.monto_total);
+    const variacion = montoMesAnterior > 0 
+      ? ((montoEsteMes - montoMesAnterior) / montoMesAnterior * 100).toFixed(1)
+      : 0;
+
+    // Calcular balance disponible (para demostración)
+    const balanceDisponible = montoEsteMes * 0.8; // 80% disponible (20% retenido)
+
+    return res.json({
+      success: true,
+      finanzas: {
+        medico: {
+          medicoid: medico?.medicoid || medicoid,
+          nombre: medico?.nombrecompleto || "",
+          tipoPlan: medico?.tipo_plan || "comision",
+          comisionPorcentaje: Number(medico?.comision_porcentaje || 10),
+          membresia: {
+            activa: Boolean(medico?.membresia_activa),
+            monto: toMoney(medico?.membresia_monto),
+          },
+          precios: {
+            presencial: toMoney(medico?.precio),
+            videollamada: toMoney(medico?.precio_videollamada),
+          },
+        },
+        mesActual: {
+          periodo: currentMonth.toLocaleString('es-ES', { month: 'long', year: 'numeric' }),
+          inicio: monthStart.toISOString().split('T')[0],
+          fin: monthEnd.toISOString().split('T')[0],
+          citas: {
+            total: Number(citas.total_citas || 0),
+            completadas: Number(citas.completadas || 0),
+            confirmadas: Number(citas.confirmadas || 0),
+            virtuales: Number(citas.virtuales || 0),
+          },
+          ingresos: {
+            bruto: toMoney(ingresos.monto_citas),
+            comisionVirem: toMoney(ingresos.comision_virem),
+            neto: montoEsteMes,
+            citasPagadas: Number(ingresos.citas_pagadas || 0),
+          },
+        },
+        resumen: {
+          balanceDisponible: toMoney(balanceDisponible),
+          ingresosEsteMes: montoEsteMes,
+          ingresosUltimoMes: montoMesAnterior,
+          variacionPorcentaje: parseFloat(variacion),
+          pagosEnTransito: toMoney(montoEsteMes * 0.2), // 20% retenido
+        },
+        transacciones: transacciones.rows.map((row) => ({
+          citaid: row.citaid,
+          fecha: row.fechahorainicio,
+          paciente: row.paciente_nombre?.trim() || "Paciente",
+          monto: toMoney(row.precio),
+          montoRecibido: toMoney(row.monto_medico),
+          comision: toMoney(row.monto_plataforma),
+          estado: row.estado_codigo,
+          modalidad: row.modalidad || "presencial",
+        })),
+      },
+    });
+  } catch (err) {
+    console.error("Error en finanzas del médico:", err);
+    return res.status(500).json({
+      success: false,
+      message: "No se pudieron cargar las finanzas.",
+    });
+  } finally {
+    if (client) client.release();
   }
 });
 

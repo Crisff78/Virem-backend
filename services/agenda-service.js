@@ -243,6 +243,10 @@ async function listMyCitas({
            c.cancelacion_motivo,
            c.disponibilidadid::text AS disponibilidadid,
            c.videosalaid::text AS videosalaid,
+           c.pago_completado,
+           c.pago_metodo,
+           c.pago_referencia,
+           c.pago_fecha,
            c.updated_at,
            COALESCE(ec.nombre, 'Pendiente') AS estado_nombre,
            COALESCE(ec.codigo, c.estado_codigo, 'pendiente') AS estado_code,
@@ -308,6 +312,10 @@ async function listMyCitas({
            c.cancelacion_motivo,
            c.disponibilidadid::text AS disponibilidadid,
            c.videosalaid::text AS videosalaid,
+           c.pago_completado,
+           c.pago_metodo,
+           c.pago_referencia,
+           c.pago_fecha,
            c.updated_at,
            COALESCE(ec.nombre, 'Pendiente') AS estado_nombre,
            COALESCE(ec.codigo, c.estado_codigo, 'pendiente') AS estado_code,
@@ -491,6 +499,7 @@ async function createMyCita({
   const medicoIdRaw = normalizeText(body?.medicoId);
   const precioRaw = Number(body?.precio);
   const precio = Number.isFinite(precioRaw) && precioRaw >= 0 ? precioRaw : null;
+  const pagoInfo = body?.pagoInfo; // { metodo: 'tarjeta', titular: '...', terminacion: '...' }
 
   if (!disponibilidadId && !fechaHoraInicio) {
     return serviceResult(400, {
@@ -664,6 +673,51 @@ async function createMyCita({
       modalidad = modeValidation.modalidad;
     }
 
+    // --- BUSINESS LOGIC: Calculate commission split and validate pricing ---
+    const medicoBusinessResult = await client.query(
+      `SELECT tipo_plan, comision_porcentaje, membresia_activa, precio, precio_videollamada 
+       FROM medico WHERE medicoid::text = $1::text LIMIT 1`,
+      [medicoId]
+    );
+    const medicoBusiness = medicoBusinessResult.rows[0] || {};
+    
+    // Determine base price based on modality subtype
+    let basePrecio = 0;
+    const virtualSubtype = body?.virtualSubtype || 'videollamada'; 
+
+    if (modalidad === 'virtual') {
+      if (virtualSubtype === 'chat') {
+        // Chat is ALWAYS FREE as per new requirements
+        basePrecio = 0;
+      } else {
+        // Videollamada is the PAID consultation
+        basePrecio = Number(medicoBusiness.precio_videollamada || medicoBusiness.precio || 1000);
+      }
+    } else {
+      // Presencial uses the general 'precio'
+      basePrecio = Number(medicoBusiness.precio || 1000);
+    }
+
+    const finalPrecio = virtualSubtype === 'chat' ? 0 : (precio !== null ? precio : basePrecio);
+
+    // VALIDATION: Only for paid consultations (not for free chat)
+    if (virtualSubtype !== 'chat') {
+      if (finalPrecio < 500 || finalPrecio > 5000) {
+        await rollbackQuietly(client);
+        return serviceResult(400, {
+          success: false,
+          message: `El precio de la consulta (${finalPrecio}) está fuera del rango permitido (RD$500 - RD$5000).`,
+        });
+      }
+    }
+
+    // COMMISSION: Mandatory 15% for paid consultations
+    const comisionPje = virtualSubtype === 'chat' ? 0 : 15; 
+    
+    const montoPlataforma = Number((finalPrecio * (comisionPje / 100)).toFixed(2));
+    const montoMedico = Number((finalPrecio - montoPlataforma).toFixed(2));
+    // --- END BUSINESS LOGIC ---
+
     if (!medicoId) {
       await rollbackQuietly(client);
       return serviceResult(400, {
@@ -723,12 +777,20 @@ async function createMyCita({
          cancelacion_motivo,
          disponibilidadid,
          estado_codigo,
+         pago_completado,
+         pago_metodo,
+         pago_referencia,
+         pago_fecha,
+         monto_total,
+         monto_plataforma,
+         monto_medico,
+         comision_aplicada,
          updated_at
        )
        VALUES (
          $1::uuid, $2, $3::uuid, $4, $5, $6,
          $7::timestamptz, $8::timestamptz, $9, $10, NOW(),
-         $11, $12, $13, NULL, NULL, $14, 'pendiente', NOW()
+         $11, $12, $13, NULL, NULL, $14, 'pendiente', $15, $16, $17, $18, $19, $20, $21, $22, NOW()
        )`,
       [
         citaId,
@@ -740,11 +802,19 @@ async function createMyCita({
         slotStart.toISOString(),
         slotEnd.toISOString(),
         slotDuration,
-        precio,
+        finalPrecio,
         motivoConsulta || null,
         modalidad,
         motivoConsulta || null,
         disponibilidadFinalId,
+        Boolean(pagoInfo),
+        pagoInfo ? (pagoInfo.metodo || 'tarjeta') : null,
+        pagoInfo ? `SIM-${randomUUID().slice(0, 8).toUpperCase()}` : null,
+        pagoInfo ? new Date().toISOString() : null,
+        finalPrecio,
+        montoPlataforma,
+        montoMedico,
+        comisionPje
       ]
     );
 
@@ -770,6 +840,11 @@ async function createMyCita({
       citaId,
       pacienteId: context.paciente.pacienteid,
       medicoId,
+    });
+
+    await appendSystemMessage(client, {
+      conversacionId,
+      text: "Este chat es para coordinación previa (ej: 'ya estoy listo'). Las consultas médicas se realizan únicamente por videollamada.",
     });
 
     let sala = null;
