@@ -1,4 +1,5 @@
 const express = require("express");
+const axios = require("axios");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const nodemailer = require("nodemailer");
@@ -90,6 +91,11 @@ const RECOVERY_HASH_SECRET =
 
 let recoveryTableReadyPromise = null;
 let recoveryTransporterCache = undefined;
+
+// Función para forzar la recarga de la configuración SMTP
+function clearSmtpCache() {
+  recoveryTransporterCache = undefined;
+}
 
 function generateRecoveryCode() {
   return String(randomInt(0, 10 ** RECOVERY_CODE_LENGTH)).padStart(
@@ -260,13 +266,14 @@ async function sendRecoveryCodeEmail({ email, code }) {
 }
 
 async function sendEmailVerificationCodeEmail({ email, code }) {
+  const makeWebhookUrl = String(process.env.MAKE_WEBHOOK_URL || "").trim();
   const transporter = getRecoveryTransporter();
   const verificationLink = buildEmailVerificationLink(email, code);
   const fromEmail =
+    String(process.env.SMTP_USER || "").trim() ||
     String(process.env.VERIFICATION_EMAIL_FROM || "").trim() ||
     String(process.env.RECOVERY_EMAIL_FROM || "").trim() ||
     String(process.env.SMTP_FROM || "").trim() ||
-    String(process.env.SMTP_USER || "").trim() ||
     "no-reply@virem.local";
 
   if (!transporter) {
@@ -278,6 +285,24 @@ async function sendEmailVerificationCodeEmail({ email, code }) {
 
     console.warn(`[VERIFY] Codigo para ${email}: ${code}`);
     return { delivered: false, devCode: code };
+  }
+
+  // Si tenemos Webhook de Make, enviamos los datos allí primero
+  if (makeWebhookUrl) {
+    try {
+      await axios.post(makeWebhookUrl, {
+        type: 'verification_code',
+        email: email,
+        code: code,
+        verificationLink: verificationLink,
+        timestamp: new Date().toISOString()
+      });
+      console.log(`✅ Datos enviados a Make.com Webhook para ${email}`);
+      return { delivered: true };
+    } catch (makeError) {
+      console.error(`❌ Error enviando a Make.com: ${makeError.message}`);
+      // Si falla Make, intentamos seguir con SMTP normal si está configurado
+    }
   }
 
   try {
@@ -335,6 +360,7 @@ async function sendEmailVerificationCodeEmail({ email, code }) {
       text: `Tu código de verificación de VIREM es: ${code}. Expira en ${EMAIL_CODE_TTL_MINUTES} minutos.`,
       html: htmlContent,
     });
+    console.log(`✅ Email de verificación enviado a ${email}`);
   } catch (error) {
     if (!allowConsoleEmailFallback()) {
       throw error;
@@ -1932,6 +1958,47 @@ router.post("/resend-verification-pending", async (req, res) => {
     });
   } finally {
     if (client) client.release();
+  }
+});
+
+
+/**
+ * RUTA DE DIAGNÓSTICO: Envía un correo de prueba usando la config actual.
+ * Acceso: http://localhost:3000/api/auth/debug-email
+ */
+router.get("/debug-email", async (req, res) => {
+  clearSmtpCache(); // Forzamos recarga de .env
+  const testEmail = req.query.email || process.env.SMTP_USER;
+  
+  try {
+    console.log(`[DEBUG] Iniciando prueba de correo para: ${testEmail}...`);
+    const result = await sendEmailVerificationCodeEmail({ 
+      email: testEmail, 
+      code: "123456" 
+    });
+    
+    if (result.delivered) {
+      return res.status(200).send(`
+        <h1>✅ ¡Éxito!</h1>
+        <p>El correo fue enviado (o los datos se enviaron a <b>Make.com</b>) correctamente para <b>${testEmail}</b>.</p>
+        <p>Revisa tu bandeja de entrada o tu escenario en Make.</p>
+      `);
+    } else {
+      return res.status(200).send(`
+        <h1>⚠️ Modo Fallback</h1>
+        <p>El correo no se envió, pero el servidor está en modo "Consola".</p>
+        <p>El código generado fue: <b>${result.devCode}</b> (mira la terminal del backend).</p>
+      `);
+    }
+  } catch (err) {
+    console.error("[DEBUG] Error en debug-email:", err);
+    return res.status(500).send(`
+      <h1>❌ Error de Envío</h1>
+      <p>Ocurrió un error técnico:</p>
+      <pre>${err.message}</pre>
+      <hr>
+      <p>Verifica que tu App Password de Gmail sea correcta y que el puerto sea 465.</p>
+    `);
   }
 });
 

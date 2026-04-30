@@ -51,4 +51,9 @@ initializeSocketServer(httpServer);
 
 httpServer.listen(PORT, "0.0.0.0", () => {
   console.log(`🚀 Backend corriendo en http://localhost:${PORT}`);
+  if (process.env.MAKE_WEBHOOK_URL) {
+    console.log(`🔗 Automatización: Make.com activa (${process.env.MAKE_WEBHOOK_URL.substring(0, 30)}...)`);
+  } else {
+    console.log(`⚠️ Automatización: Make.com no configurada (usando SMTP local)`);
+  }
 });
