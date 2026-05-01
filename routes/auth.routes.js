@@ -1126,11 +1126,16 @@ router.post("/register/confirm", async (req, res) => {
         [roleId, normalizedEmail, passwordhash]
       );
       usuarioid = ins.rows[0].usuarioid;
-      await client.query(
-        `INSERT INTO paciente (usuarioid, nombres, apellidos, fechanacimiento, genero, cedula, telefono)
-         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-        [usuarioid, body.nombres, body.apellidos, toSqlDate(body.fechanacimiento), body.genero, body.cedula, body.telefono]
-      );
+      await insertPacienteCompatible({
+        client,
+        usuarioid,
+        nombres: body.nombres,
+        apellidos: body.apellidos,
+        fechaSQL: toSqlDate(body.fechanacimiento),
+        genero: body.genero,
+        cedulaClean: body.cedula,
+        telefonoClean: body.telefono
+      });
     }
 
     await deletePendingRegistration(client, pendingId);
