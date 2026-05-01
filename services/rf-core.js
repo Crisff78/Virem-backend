@@ -453,8 +453,17 @@ async function ensureRfCoreSchema(dbClient = null) {
     );
 
     await db.query(
-      `CREATE INDEX IF NOT EXISTS idx_valoracion_medico_estado
-       ON valoracion (medicoid_text, estado_moderacion, created_at DESC)`
+      `CREATE TABLE IF NOT EXISTS recovery_tokens (
+        email TEXT PRIMARY KEY,
+        code VARCHAR(10) NOT NULL,
+        expires_at TIMESTAMPTZ NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`
+    );
+
+    await db.query(
+      `CREATE INDEX IF NOT EXISTS idx_recovery_tokens_expires
+       ON recovery_tokens (expires_at)`
     );
   })();
 

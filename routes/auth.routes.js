@@ -1154,6 +1154,119 @@ router.post("/register/confirm", async (req, res) => {
   }
 });
 
+// =============================================================================
+// PASSWORD RECOVERY FLOW
+// =============================================================================
+
+router.post("/recovery/send-code", async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ success: false, message: "Email requerido." });
+  
+  const normalizedEmail = email.toLowerCase().trim();
+  const client = await pool.connect();
+  
+  try {
+    const userCheck = await client.query("SELECT usuarioid FROM usuario WHERE email = $1", [normalizedEmail]);
+    if (userCheck.rows.length === 0) {
+      return res.status(200).json({ success: true, message: "Si el correo existe, recibirás un código." });
+    }
+
+    const codigo = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 min
+
+    await client.query(
+      `INSERT INTO recovery_tokens (email, code, expires_at) 
+       VALUES ($1, $2, $3) 
+       ON CONFLICT (email) DO UPDATE SET code = $2, expires_at = $3`,
+      [normalizedEmail, codigo, expiresAt]
+    );
+
+    try {
+      await fetch("https://hook.us1.make.com/6v270is1i4r32d84713m7x371u5w9k3w", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          tipo: "recuperacion",
+          email: normalizedEmail,
+          codigo: codigo,
+          nombre: "Usuario de VIREM",
+          timestamp: new Date().toISOString()
+        })
+      });
+    } catch (e) {
+      console.error("Error sending recovery email to Make:", e);
+    }
+
+    return res.json({ 
+      success: true, 
+      message: "Código enviado correctamente.",
+      devCode: process.env.NODE_ENV === "development" || true ? codigo : undefined
+    });
+  } catch (err) {
+    console.error("Error in recovery/send-code:", err);
+    return res.status(500).json({ success: false, message: "Error al procesar la solicitud." });
+  } finally {
+    client.release();
+  }
+});
+
+router.post("/recovery/verify-code", async (req, res) => {
+  const { email, codigo } = req.body;
+  const normalizedEmail = String(email || "").toLowerCase().trim();
+  
+  try {
+    const result = await pool.query(
+      "SELECT * FROM recovery_tokens WHERE email = $1 AND code = $2 AND expires_at > NOW()",
+      [normalizedEmail, codigo]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(400).json({ success: false, message: "Código inválido o expirado." });
+    }
+
+    return res.json({ success: true, message: "Código verificado." });
+  } catch (err) {
+    console.error("Error in recovery/verify-code:", err);
+    return res.status(500).json({ success: false, message: "Error al verificar código." });
+  }
+});
+
+router.post("/recovery/reset-password", async (req, res) => {
+  const { email, newPassword } = req.body;
+  if (!email || !newPassword) return res.status(400).json({ success: false, message: "Faltan datos." });
+
+  const normalizedEmail = email.toLowerCase().trim();
+  const client = await pool.connect();
+  
+  try {
+    await client.query("BEGIN");
+
+    const tokenCheck = await client.query(
+      "SELECT * FROM recovery_tokens WHERE email = $1 AND expires_at > NOW()",
+      [normalizedEmail]
+    );
+
+    if (tokenCheck.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ success: false, message: "Sesión de recuperación expirada." });
+    }
+
+    const passwordhash = await bcrypt.hash(String(newPassword), 10);
+    await client.query("UPDATE usuario SET passwordhash = $1 WHERE email = $2", [passwordhash, normalizedEmail]);
+    
+    await client.query("DELETE FROM recovery_tokens WHERE email = $1", [normalizedEmail]);
+
+    await client.query("COMMIT");
+    return res.json({ success: true, message: "Contraseña actualizada con éxito." });
+  } catch (err) {
+    if (client) await client.query("ROLLBACK");
+    console.error("Error in recovery/reset-password:", err);
+    return res.status(500).json({ success: false, message: "Error al actualizar contraseña." });
+  } finally {
+    client.release();
+  }
+});
+
 
 function renderEmailVerificationPage({
   title,
