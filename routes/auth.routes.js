@@ -1139,7 +1139,11 @@ router.post("/register/confirm", async (req, res) => {
   } catch (err) {
     if (client) await client.query("ROLLBACK");
     console.error("Error confirming registration:", err);
-    return res.status(500).json({ success: false, message: "Error al crear la cuenta." });
+    return res.status(500).json({ 
+      success: false, 
+      message: "Error al crear la cuenta.",
+      error: err.message
+    });
   } finally {
     if (client) client.release();
   }
