@@ -3,8 +3,10 @@ const pool = require('../config/db');
 const { requireAuth } = require('./middleware/auth');
 const {
   ADMIN_ROLE_ID,
+  MEDICO_ROLE_ID,
   requireRole,
   requireOwnership,
+  getAccessActor,
 } = require('./middleware/access-control');
 
 const router = express.Router();
@@ -25,11 +27,31 @@ async function resolvePacienteOwner(req) {
     };
   }
 
+  const ownerUserIds = [result.rows[0].usuarioid];
+
+  // Si el actor es médico, verifiquemos si tiene una cita activa con este paciente
+  const actor = await getAccessActor(req);
+  if (actor.roleId === MEDICO_ROLE_ID) {
+    const citaCheck = await pool.query(
+      `SELECT m.usuarioid
+       FROM cita c
+       JOIN medico m ON m.medicoid = c.medicoid
+       WHERE c.pacienteid = $1
+         AND m.usuarioid = $2
+         AND c.estado_codigo IN ('pendiente', 'confirmada', 'reprogramada')
+       LIMIT 1`,
+      [req.params.id, actor.usuarioid]
+    );
+    if (citaCheck.rows.length) {
+      ownerUserIds.push(actor.usuarioid);
+    }
+  }
+
   return {
     exists: true,
-    ownerUserIds: [result.rows[0].usuarioid],
+    ownerUserIds,
     notFoundMessage: 'Paciente no encontrado.',
-    forbiddenMessage: 'No puedes acceder al perfil de otro paciente.',
+    forbiddenMessage: 'No tienes permisos para acceder a este perfil.',
   };
 }
 

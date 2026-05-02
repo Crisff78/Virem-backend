@@ -1,6 +1,8 @@
 const pool = require("../../config/db");
 
 const ADMIN_ROLE_ID = 3;
+const MEDICO_ROLE_ID = 2;
+const PACIENTE_ROLE_ID = 1;
 
 function toPositiveInt(value) {
   const parsed = Number.parseInt(String(value || ""), 10);
@@ -170,6 +172,8 @@ function requireOwnership(resolveOwnership, options = {}) {
 
 module.exports = {
   ADMIN_ROLE_ID,
+  MEDICO_ROLE_ID,
+  PACIENTE_ROLE_ID,
   getAccessActor,
   requireRole,
   requireOwnership,
