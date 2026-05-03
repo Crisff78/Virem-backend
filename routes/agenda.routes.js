@@ -1744,6 +1744,7 @@ router.get("/me/notificaciones", requireAuth, async (req, res) => {
        FROM notificaciones n
        WHERE n.usuarioid = $1
          AND ($2::boolean = FALSE OR n.leida = FALSE)
+         AND n.created_at >= NOW() - INTERVAL '7 days'
        ORDER BY n.created_at DESC
        LIMIT $3`,
       [Number(context.user.usuarioid), onlyUnread, limit]
