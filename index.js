@@ -49,6 +49,13 @@ pool.query("SELECT NOW()")
 const PORT = process.env.PORT || 3000;
 initializeSocketServer(httpServer);
 
+// Reminder Service Loop
+const { processPendingReminders } = require("./services/reminder-service");
+const REMINDER_INTERVAL_MS = 60000; // 1 minute
+setInterval(() => {
+  processPendingReminders().catch(err => console.error("Error in reminder interval:", err));
+}, REMINDER_INTERVAL_MS);
+
 httpServer.listen(PORT, "0.0.0.0", () => {
   console.log(`🚀 Backend corriendo en http://localhost:${PORT}`);
   if (process.env.MAKE_WEBHOOK_URL) {

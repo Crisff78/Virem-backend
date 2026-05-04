@@ -203,6 +203,10 @@ async function ensurePlatformSchema() {
     );
     await pool.query(
       `ALTER TABLE cita
+       ADD COLUMN IF NOT EXISTS reminders_sent JSONB NOT NULL DEFAULT '{}'::jsonb`
+    );
+    await pool.query(
+      `ALTER TABLE cita
        ADD COLUMN IF NOT EXISTS videosalaid UUID`
     );
 
@@ -680,6 +684,8 @@ async function resolveMedicoUserIds(client, medicoId) {
   return [...new Set(numericIds)];
 }
 
+const axios = require("axios");
+
 async function createNotification(
   client,
   { usuarioid, tipo, titulo, contenido = "", data = {} }
@@ -720,7 +726,32 @@ async function createNotification(
     createdAt: row.created_at || null,
     leida: false,
   };
+
+  // 1. Emit to Socket for Real-time UI
   emitToUser(userId, "notificacion_nueva", payload);
+
+  // 2. Call Webhook for External Automation (Make/n8n)
+  if (process.env.MAKE_WEBHOOK_URL) {
+    // Try to get user contact info for the webhook
+    try {
+      const userResult = await client.query(
+        "SELECT email, telefono FROM usuario WHERE usuarioid = $1",
+        [userId]
+      );
+      const userContact = userResult.rows[0] || {};
+      
+      axios.post(process.env.MAKE_WEBHOOK_URL, {
+        event: "notification",
+        userId,
+        email: userContact.email,
+        telefono: userContact.telefono,
+        ...payload
+      }).catch(e => console.warn("[Webhook] Global webhook failed:", e.message));
+    } catch (err) {
+      console.warn("[Webhook] Failed to fetch user contact for webhook:", err.message);
+    }
+  }
+
   return payload;
 }
 
@@ -1069,12 +1100,14 @@ function canJoinVideoRoom({ citaStart, roomEstado, roleId }) {
 
   const now = Date.now();
   const startMs = start.getTime();
-  const preJoinWindowMs = 15 * 60 * 1000;
-  const postWindowMs = 6 * 60 * 60 * 1000;
+  const preJoinWindowMs = 2 * 60 * 1000; // 2 minutes buffer for patients
+  const postWindowMs = 6 * 60 * 60 * 1000; // 6 hours window
 
   if (roleId === MEDICO_ROLE_ID) return now <= startMs + postWindowMs;
   if (roleId === PACIENTE_ROLE_ID) {
-    return normalizedRoomEstado === "abierta" && now <= startMs + postWindowMs;
+    // Patients can join if room is open OR if it's the time (even if doctor hasn't opened it yet, Jitsi will just wait)
+    // BUT the user wants it to be functional ONLY when it's the time.
+    return now >= startMs - preJoinWindowMs && now <= startMs + postWindowMs;
   }
   return now >= startMs - preJoinWindowMs && now <= startMs + postWindowMs;
 }
