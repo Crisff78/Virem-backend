@@ -831,7 +831,7 @@ async function appendSystemMessage(client, { conversacionId, text }) {
   );
 }
 
-async function ensureVideoSala(client, { citaId, provider = "jitsi" }) {
+async function ensureVideoSala(client, { citaId, provider = "livekit" }) {
   const existing = await client.query(
     `SELECT
        videosalaid::text AS videosalaid,
@@ -851,9 +851,11 @@ async function ensureVideoSala(client, { citaId, provider = "jitsi" }) {
   if (existing.rows.length) return existing.rows[0];
 
   const videosalaid = randomUUID();
-  const roomName = `virem-${String(citaId).slice(0, 8)}-${Date.now().toString(36)}`;
-  const jitsiBase = normalizeText(process.env.JITSI_BASE_URL) || "https://meet.jit.si";
-  const joinUrl = `${jitsiBase.replace(/\/+$/, "")}/${roomName}`;
+  // Room name based on citaId for LiveKit
+  const roomName = `room_${String(citaId)}`;
+  
+  // For LiveKit, we don't store a static joinUrl, tokens are generated per-user.
+  const joinUrl = ""; 
 
   const inserted = await client.query(
     `INSERT INTO video_salas (
@@ -1100,13 +1102,11 @@ function canJoinVideoRoom({ citaStart, roomEstado, roleId }) {
 
   const now = Date.now();
   const startMs = start.getTime();
-  const preJoinWindowMs = 2 * 60 * 1000; // 2 minutes buffer for patients
+  const preJoinWindowMs = 60 * 1000; // 1 minute buffer for patients
   const postWindowMs = 6 * 60 * 60 * 1000; // 6 hours window
 
   if (roleId === MEDICO_ROLE_ID) return now <= startMs + postWindowMs;
   if (roleId === PACIENTE_ROLE_ID) {
-    // Patients can join if room is open OR if it's the time (even if doctor hasn't opened it yet, Jitsi will just wait)
-    // BUT the user wants it to be functional ONLY when it's the time.
     return now >= startMs - preJoinWindowMs && now <= startMs + postWindowMs;
   }
   return now >= startMs - preJoinWindowMs && now <= startMs + postWindowMs;

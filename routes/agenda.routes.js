@@ -47,6 +47,8 @@ const {
   updateMyCitaEstado,
 } = require("../services/agenda-service");
 
+const { generateLiveKitToken } = require("../services/livekit.service");
+
 const router = express.Router();
 
 const ROLE_BY_ID = {
@@ -1371,12 +1373,26 @@ router.get("/me/citas/:citaId/video-sala", requireAuth, async (req, res) => {
       });
     }
 
-    const sala = await ensureVideoSala(client, { citaId, provider: "jitsi" });
+    const sala = await ensureVideoSala(client, { citaId, provider: "livekit" });
     const canJoin = canJoinVideoRoom({
       citaStart: cita.fechahorainicio,
       roomEstado: sala?.estado,
       roleId: context.roleId,
     });
+
+    let liveKitToken = null;
+    if (canJoin && sala) {
+      const identity = context.user.usuarioid.toString();
+      const name = context.roleId === MEDICO_ROLE_ID 
+        ? context.medico.nombrecompleto 
+        : `${context.paciente.nombres} ${context.paciente.apellidos}`;
+      
+      try {
+        liveKitToken = await generateLiveKitToken(sala.room_name, identity, name);
+      } catch (tokenErr) {
+        console.error("Error generating LiveKit token:", tokenErr);
+      }
+    }
 
     return res.json({
       success: true,
@@ -1385,12 +1401,13 @@ router.get("/me/citas/:citaId/video-sala", requireAuth, async (req, res) => {
             videoSalaId: normalizeText(sala.videosalaid),
             proveedor: normalizeText(sala.proveedor),
             roomName: normalizeText(sala.room_name),
-            joinUrl: normalizeText(sala.token_o_url),
+            joinUrl: liveKitToken, // Use token as joinUrl for LiveKit
+            token: liveKitToken,
             estado: normalizeText(sala.estado) || "pendiente",
             openedAt: sala.opened_at || null,
             closedAt: sala.closed_at || null,
             canJoin,
-            jitsiDomain: normalizeText(process.env.JITSI_BASE_URL || "meet.jit.si").replace(/^https?:\/\//, ""),
+            liveKitUrl: process.env.LIVEKIT_URL || "wss://virem.livekit.cloud",
           }
         : null,
     });
@@ -1444,7 +1461,7 @@ router.post("/me/citas/:citaId/video-sala/abrir", requireAuth, async (req, res) 
       });
     }
 
-    await ensureVideoSala(client, { citaId, provider: "jitsi" });
+    const salaResult = await ensureVideoSala(client, { citaId, provider: "livekit" });
     const updateSala = await client.query(
       `UPDATE video_salas
        SET estado = 'abierta',
@@ -1462,6 +1479,20 @@ router.post("/me/citas/:citaId/video-sala/abrir", requireAuth, async (req, res) 
     );
 
     const sala = updateSala.rows[0] || null;
+
+    let liveKitTokenDoctor = null;
+    if (sala) {
+      try {
+        liveKitTokenDoctor = await generateLiveKitToken(
+          sala.room_name, 
+          context.user.usuarioid.toString(), 
+          context.medico.nombrecompleto
+        );
+      } catch (tokenErr) {
+        console.error("Error generating LiveKit token for doctor:", tokenErr);
+      }
+    }
+
     const doctorCanJoin = canJoinVideoRoom({
       citaStart: cita.fechahorainicio,
       roomEstado: sala?.estado,
@@ -1472,6 +1503,19 @@ router.post("/me/citas/:citaId/video-sala/abrir", requireAuth, async (req, res) 
       roomEstado: sala?.estado,
       roleId: PACIENTE_ROLE_ID,
     });
+
+    // Generate token for patient socket event as well (optional but good for pre-emptive load)
+    let liveKitTokenPatient = null;
+    if (sala && patientCanJoin) {
+      try {
+        liveKitTokenPatient = await generateLiveKitToken(
+          sala.room_name, 
+          cita.pacienteid.toString(), 
+          cita.paciente_nombre
+        );
+      } catch (e) {}
+    }
+
     const conversacionId = await ensureConversation(client, {
       citaId,
       pacienteId: cita.pacienteid,
@@ -1500,12 +1544,15 @@ router.post("/me/citas/:citaId/video-sala/abrir", requireAuth, async (req, res) 
           ? {
               videoSalaId: normalizeText(sala.videosalaid),
               estado: normalizeText(sala.estado),
-              joinUrl: normalizeText(sala.token_o_url),
+              joinUrl: liveKitTokenPatient, 
+              token: liveKitTokenPatient,
               canJoin: patientCanJoin,
+              liveKitUrl: process.env.LIVEKIT_URL || "wss://virem.livekit.cloud",
             }
           : null,
       },
     });
+
     emitConversationEvent({
       eventName: "mensaje_nuevo",
       conversacionId,
@@ -1525,12 +1572,13 @@ router.post("/me/citas/:citaId/video-sala/abrir", requireAuth, async (req, res) 
             videoSalaId: normalizeText(sala.videosalaid),
             proveedor: normalizeText(sala.proveedor),
             roomName: normalizeText(sala.room_name),
-            joinUrl: normalizeText(sala.token_o_url),
+            joinUrl: liveKitTokenDoctor,
+            token: liveKitTokenDoctor,
             estado: normalizeText(sala.estado),
             openedAt: sala.opened_at || null,
             closedAt: sala.closed_at || null,
             canJoin: doctorCanJoin,
-            jitsiDomain: normalizeText(process.env.JITSI_BASE_URL || "meet.jit.si").replace(/^https?:\/\//, ""),
+            liveKitUrl: process.env.LIVEKIT_URL || "wss://virem.livekit.cloud",
           }
         : null,
     });

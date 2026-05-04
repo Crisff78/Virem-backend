@@ -26,6 +26,7 @@
     "express-rate-limit": "^8.2.1",
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.3",
+    "livekit-server-sdk": "^2.15.2",
     "node-fetch": "^3.3.2",
     "nodemailer": "^7.0.12",
     "pg": "^8.19.0",
