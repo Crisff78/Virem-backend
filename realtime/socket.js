@@ -446,6 +446,7 @@ function initializeSocketServer(httpServer) {
       socket.to(room).emit("typing", {
         conversacionId: cleanConversationId,
         usuarioid: userId,
+        emisorTipo: auth.roleId === PACIENTE_ROLE_ID ? "paciente" : "medico",
         isTyping: Boolean(isTyping),
         at: new Date().toISOString(),
       });
