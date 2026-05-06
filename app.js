@@ -9,6 +9,7 @@ const {
 const { requestContext, requestLogger } = require("./middleware/request-context");
 const { securityHeaders } = require("./middleware/security");
 const { notFoundHandler, errorHandler } = require("./middleware/error-handler");
+const { systemRequestLogger } = require("./middleware/system-logger");
 
 function buildCorsOriginError(origin) {
     const err = new Error("Origin no permitido por CORS.");
@@ -50,6 +51,7 @@ function createApp() {
     });
 
     app.set("trust proxy", 1);
+    app.use(systemRequestLogger);
     app.use(requestContext);
     app.use(requestLogger);
     app.use(securityHeaders);
@@ -129,4 +131,3 @@ function createApp() {
 }
 
 module.exports = { createApp };
-

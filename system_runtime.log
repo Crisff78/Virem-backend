@@ -1,0 +1,5 @@
+[SYSTEM] Logger initialized at 2026-05-06T01:24:00.778Z
+[9:24:02 p. m.] [SERVER] Backend corriendo en http://localhost:3000
+[9:24:03 p. m.] [SUCCESS] Conectado a Supabase correctamente
+[9:24:03 p. m.] [INFO] Inicializando esquemas de base de datos...
+[9:24:07 p. m.] [SUCCESS] Todos los esquemas han sido verificados.

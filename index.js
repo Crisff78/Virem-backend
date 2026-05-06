@@ -4,6 +4,7 @@ const pool = require("./config/db");
 const { createApp } = require("./app");
 const { initializeSocketServer } = require("./realtime/socket");
 const { validateCriticalEnv } = require("./config/env");
+const sysLogger = require("./utils/sysLogger");
 
 const app = createApp();
 const httpServer = http.createServer(app);
@@ -27,9 +28,9 @@ const { ensureUserProfileTable } = require("./services/user-profile.store");
 
 pool.query("SELECT NOW()")
   .then(async res => {
-    console.log("✅ Conectado a Supabase correctamente");
+    sysLogger.add("Conectado a Supabase correctamente", "SUCCESS");
     try {
-      console.log("⏳ Inicializando esquemas de base de datos...");
+      sysLogger.add("Inicializando esquemas de base de datos...", "INFO");
       await Promise.all([
         ensureRfCoreSchema(),
         ensurePlatformSchema(),
@@ -37,9 +38,9 @@ pool.query("SELECT NOW()")
       ]);
       
       await ensureEstadoCatalog(pool);
-      console.log("✅ Todos los esquemas han sido verificados.");
+      sysLogger.add("Todos los esquemas han sido verificados.", "SUCCESS");
     } catch (err) {
-      console.error("❌ Error inicializando esquemas:", err.message);
+      sysLogger.add(`Error inicializando esquemas: ${err.message}`, "ERROR");
     }
   })
   .catch(err => {
@@ -57,7 +58,7 @@ setInterval(() => {
 }, REMINDER_INTERVAL_MS);
 
 httpServer.listen(PORT, "0.0.0.0", () => {
-  console.log(`🚀 Backend corriendo en http://localhost:${PORT}`);
+  sysLogger.add(`Backend corriendo en http://localhost:${PORT}`, "SERVER");
   if (process.env.MAKE_WEBHOOK_URL) {
     console.log(`🔗 Automatización: Make.com activa (${process.env.MAKE_WEBHOOK_URL.substring(0, 30)}...)`);
   } else {
