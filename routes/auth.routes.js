@@ -941,7 +941,7 @@ router.post("/register/confirm", async (req, res) => {
       const passwordhash = await bcrypt.hash(String(body.password), 10);
       const ins = await client.query(
         `INSERT INTO usuario (rolid, email, passwordhash, fechacreacion, activo, account_status, email_verificado, email_verificado_at, aprobado_por_admin)
-         VALUES ($1,$2,$3,NOW(),TRUE,'pendiente_aprobacion',TRUE,NOW(),FALSE)
+         VALUES ($1,$2,$3,NOW(),TRUE,'activa',TRUE,NOW(),TRUE)
          RETURNING usuarioid`,
         [roleId, normalizedEmail, passwordhash]
       );
