@@ -1,7 +1,10 @@
-[SYSTEM] Logger initialized at 2026-05-06T15:44:15.180Z
-[11:44:18 a. m.] [SERVER] Backend corriendo en http://localhost:3000
-[11:44:18 a. m.] [INFO] Automatización: Make.com activa (https://hook.us2.make.com/mihua6oq9816sr...)
-[11:44:18 a. m.] [SUCCESS] Validación: Veriphone API integrada correctamente
-[11:44:19 a. m.] [SUCCESS] Conectado a Supabase correctamente
-[11:44:19 a. m.] [INFO] Inicializando esquemas de base de datos...
-[11:44:23 a. m.] [SUCCESS] Todos los esquemas han sido verificados.
+[SYSTEM] Logger initialized at 2026-05-06T16:50:28.850Z
+[12:50:29 p. m.] [SERVER] Backend corriendo en http://localhost:3000
+[12:50:29 p. m.] [WARNING] Automatización: Make.com no configurada (usando fallback SMTP)
+[12:50:29 p. m.] [SUCCESS] Validación: Veriphone API integrada correctamente
+[12:50:29 p. m.] [SUCCESS] Conectado a Supabase correctamente
+[12:50:29 p. m.] [INFO] Inicializando esquemas de base de datos...
+[12:50:34 p. m.] [SUCCESS] Todos los esquemas han sido verificados.
+[12:51:35 p. m.] [ERROR] POST /api/auth/login 401 - 392ms
+[12:51:36 p. m.] [ERROR] POST /api/auth/login 401 - 243ms
+[12:51:36 p. m.] [ERROR] POST /api/auth/login 401 - 184ms
