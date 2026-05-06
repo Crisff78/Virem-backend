@@ -1,7 +1,7 @@
-[SYSTEM] Logger initialized at 2026-05-06T11:33:56.950Z
-[7:33:58 a. m.] [SERVER] Backend corriendo en http://localhost:3000
-[7:33:58 a. m.] [INFO] Automatización: Make.com activa (https://hook.us2.make.com/mihua6oq9816sr...)
-[7:33:58 a. m.] [SUCCESS] Validación: Veriphone API integrada correctamente
-[7:33:58 a. m.] [SUCCESS] Conectado a Supabase correctamente
-[7:33:58 a. m.] [INFO] Inicializando esquemas de base de datos...
-[7:34:03 a. m.] [SUCCESS] Todos los esquemas han sido verificados.
+[SYSTEM] Logger initialized at 2026-05-06T12:35:57.998Z
+[8:35:58 a. m.] [SERVER] Backend corriendo en http://localhost:3000
+[8:35:58 a. m.] [INFO] Automatización: Make.com activa (https://hook.us2.make.com/mihua6oq9816sr...)
+[8:35:58 a. m.] [SUCCESS] Validación: Veriphone API integrada correctamente
+[8:35:59 a. m.] [SUCCESS] Conectado a Supabase correctamente
+[8:35:59 a. m.] [INFO] Inicializando esquemas de base de datos...
+[8:36:03 a. m.] [SUCCESS] Todos los esquemas han sido verificados.
