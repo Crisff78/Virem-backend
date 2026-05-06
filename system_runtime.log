@@ -1,10 +1,7 @@
-[SYSTEM] Logger initialized at 2026-05-06T18:25:45.882Z
-[2:25:46 p. m.] [SERVER] Backend corriendo en http://localhost:3000
-[2:25:46 p. m.] [WARNING] Automatización: Make.com no configurada (usando fallback SMTP)
-[2:25:46 p. m.] [SUCCESS] Validación: Veriphone API integrada correctamente
-[2:25:46 p. m.] [SUCCESS] Conectado a Supabase correctamente
-[2:25:46 p. m.] [INFO] Inicializando esquemas de base de datos...
-[2:25:53 p. m.] [SUCCESS] Todos los esquemas han sido verificados.
-[2:29:34 p. m.] [HTTP] GET /api/agenda/me/conversaciones?limit=150 304 - 657ms
-[2:29:36 p. m.] [HTTP] GET /api/agenda/me/conversaciones/5a4463c3-8d95-4999-aa75-57838d28c2f4/mensajes?limit=120 304 - 294ms
-[2:29:36 p. m.] [HTTP] PATCH /api/agenda/me/conversaciones/5a4463c3-8d95-4999-aa75-57838d28c2f4/leido 200 - 297ms
+[SYSTEM] Logger initialized at 2026-05-06T18:47:51.275Z
+[2:47:51 p. m.] [SERVER] Backend corriendo en http://localhost:3000
+[2:47:51 p. m.] [WARNING] Automatización: Make.com no configurada (usando fallback SMTP)
+[2:47:51 p. m.] [SUCCESS] Validación: Veriphone API integrada correctamente
+[2:47:51 p. m.] [SUCCESS] Conectado a Supabase correctamente
+[2:47:51 p. m.] [INFO] Inicializando esquemas de base de datos...
+[2:47:56 p. m.] [SUCCESS] Todos los esquemas han sido verificados.

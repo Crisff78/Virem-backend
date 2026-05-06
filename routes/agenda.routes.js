@@ -89,11 +89,11 @@ async function fetchConversationForContext(client, { conversacionId, context, lo
        p.usuarioid AS paciente_usuarioid,
        m.usuarioid AS medico_usuarioid
      FROM conversaciones conv
-     JOIN paciente p ON p.pacienteid = conv.pacienteid
-     JOIN medico m ON m.medicoid = conv.medicoid
+     LEFT JOIN paciente p ON p.pacienteid = conv.pacienteid
+     LEFT JOIN medico m ON m.medicoid = conv.medicoid
      WHERE ${where.join(" AND ")}
      LIMIT 1
-     ${lock ? "FOR UPDATE" : ""}`,
+     ${lock ? "FOR UPDATE OF conv" : ""}`,
     params
   );
 
@@ -1309,12 +1309,12 @@ router.post("/me/conversaciones/:conversacionId/mensajes", requireAuth, async (r
       mensaje: messagePayload,
     });
   } catch (err) {
+    console.error("Error POST /me/conversaciones/:conversacionId/mensajes:", err);
     if (client) {
       try {
         await client.query("ROLLBACK");
       } catch (_) {}
     }
-    console.error("Error POST /agenda/me/conversaciones/:id/mensajes:", err);
     return res.status(500).json({
       success: false,
       message: "No se pudo enviar el mensaje.",
