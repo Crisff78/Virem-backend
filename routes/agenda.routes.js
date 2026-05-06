@@ -85,8 +85,12 @@ async function fetchConversationForContext(client, { conversacionId, context, lo
        conv.pacienteid::text AS pacienteid,
        conv.medicoid::text AS medicoid,
        conv.estado,
-       conv.updated_at
+       conv.updated_at,
+       p.usuarioid AS paciente_usuarioid,
+       m.usuarioid AS medico_usuarioid
      FROM conversaciones conv
+     JOIN paciente p ON p.pacienteid = conv.pacienteid
+     JOIN medico m ON m.medicoid = conv.medicoid
      WHERE ${where.join(" AND ")}
      LIMIT 1
      ${lock ? "FOR UPDATE" : ""}`,
@@ -1276,7 +1280,7 @@ router.post("/me/conversaciones/:conversacionId/mensajes", requireAuth, async (r
       }
     } else {
       await createNotification(client, {
-        usuarioid: Number(conversation.pacienteid),
+        usuarioid: Number(conversation.paciente_usuarioid),
         tipo: "mensaje_nuevo",
         titulo: "Nuevo mensaje del medico",
         contenido,
