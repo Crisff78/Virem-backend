@@ -45,9 +45,9 @@ router.get("/medico/me/recetas", requireAuth, async (req, res) => {
     const medicoid = String(req.user.medicoid || req.user.usuarioid);
     const result = await pool.query(
       `SELECT r.recetaid::text, r.diagnostico, r.medicamentos_json, r.instrucciones, r.created_at,
-              u.nombres || ' ' || u.apellidos AS paciente_nombre
+              COALESCE(p.nombres || ' ' || p.apellidos, 'Paciente') AS paciente_nombre
        FROM receta_medica r
-       JOIN usuario u ON u.usuarioid = r.pacienteid
+       LEFT JOIN paciente p ON p.usuarioid = r.pacienteid
        WHERE r.medicoid_text = $1
        ORDER BY r.created_at DESC`,
       [medicoid]
@@ -69,9 +69,9 @@ router.get("/paciente/me/recetas", requireAuth, async (req, res) => {
 
     const result = await pool.query(
       `SELECT r.recetaid::text, r.diagnostico, r.medicamentos_json, r.instrucciones, r.created_at,
-              m.nombre || ' ' || m.apellido AS medico_nombre
+              COALESCE(m.nombrecompleto, 'Médico') AS medico_nombre
        FROM receta_medica r
-       JOIN usuario m ON m.usuarioid::text = r.medicoid_text
+       LEFT JOIN medico m ON m.usuarioid::text = r.medicoid_text
        WHERE r.pacienteid = $1
        ORDER BY r.created_at DESC`,
       [req.user.usuarioid]
