@@ -1451,6 +1451,7 @@ router.get("/it-stats", async (req, res) => {
 
     // Load Simulation
     stats.dbLoad = Math.min(95, 2 + (stats.activeSessions * 0.5) + (Math.random() * 3));
+    stats.dbLoad = parseFloat(stats.dbLoad.toFixed(2));
 
     return res.json({ success: true, stats });
   } catch (err) {
