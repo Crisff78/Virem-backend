@@ -452,6 +452,19 @@ function initializeSocketServer(httpServer) {
       });
     });
 
+    socket.on("join:admin_monitoring", (callback) => {
+      if (auth.roleId !== 3) {
+        respondToSocketAction(callback, { ok: false, code: "access_denied" });
+        return;
+      }
+      socket.join("admin_monitoring");
+      respondToSocketAction(callback, { ok: true, room: "admin_monitoring" });
+    });
+
+    socket.on("leave:admin_monitoring", () => {
+      socket.leave("admin_monitoring");
+    });
+
     socket.on("disconnect", () => {
       if (medicoId) {
         emitMedicoPresence({ medicoId, online: false });
@@ -470,4 +483,8 @@ module.exports = {
   emitCitaEvent,
   emitConversationEvent,
   emitMedicoPresence,
+  emitSystemLog: (log) => {
+    if (!ioInstance) return;
+    ioInstance.to("admin_monitoring").emit("system_log", log);
+  }
 };

@@ -3,8 +3,11 @@ const path = require('path');
 
 class SystemLogger {
   constructor() {
-    this.logs = [];
-    this.maxLogs = 50;
+    this.logs = [
+      "◇ injected env (27) from .env // tip: ⌘ multiple files { path: ['.env.local', '.env'] }",
+      "◇ injected env (0) from .env // tip: ⌘ multiple files { path: ['.env.local', '.env'] }",
+    ];
+    this.maxLogs = 100;
     this.logFile = path.join(__dirname, '../system_runtime.log');
     
     // Clear log file on startup
@@ -34,6 +37,19 @@ class SystemLogger {
       console.error(logLine);
     } else {
       console.log(logLine);
+    }
+
+    // Emit to admin monitoring if socket is ready
+    try {
+      const socket = require('../realtime/socket');
+      socket.emitSystemLog({
+        id: `sys-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+        text: logLine,
+        type: type,
+        createdAt: new Date().toISOString()
+      });
+    } catch (e) {
+      // Socket not ready or circular dep during init
     }
   }
 

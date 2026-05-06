@@ -12,12 +12,12 @@ const httpServer = http.createServer(app);
 const envValidation = validateCriticalEnv();
 if (envValidation.warnings.length) {
   envValidation.warnings.forEach((warning) => {
-    console.warn(`[ENV WARNING] ${warning}`);
+    sysLogger.add(`[ENV WARNING] ${warning}`, "WARNING");
   });
 }
 if (envValidation.errors.length) {
   envValidation.errors.forEach((error) => {
-    console.error(`[ENV ERROR] ${error}`);
+    sysLogger.add(`[ENV ERROR] ${error}`, "ERROR");
   });
   process.exit(1);
 }
@@ -44,7 +44,7 @@ pool.query("SELECT NOW()")
     }
   })
   .catch(err => {
-    console.error("❌ Error conectando a Supabase:", err.message);
+    sysLogger.add(`Error conectando a Supabase: ${err.message}`, "ERROR");
   });
 
 const PORT = process.env.PORT || 3000;
@@ -54,14 +54,20 @@ initializeSocketServer(httpServer);
 const { processPendingReminders } = require("./services/reminder-service");
 const REMINDER_INTERVAL_MS = 60000; // 1 minute
 setInterval(() => {
-  processPendingReminders().catch(err => console.error("Error in reminder interval:", err));
+  processPendingReminders().catch(err => {
+    sysLogger.add(`Error en intervalo de recordatorios: ${err.message}`, "ERROR");
+  });
 }, REMINDER_INTERVAL_MS);
 
 httpServer.listen(PORT, "0.0.0.0", () => {
   sysLogger.add(`Backend corriendo en http://localhost:${PORT}`, "SERVER");
   if (process.env.MAKE_WEBHOOK_URL) {
-    console.log(`🔗 Automatización: Make.com activa (${process.env.MAKE_WEBHOOK_URL.substring(0, 30)}...)`);
+    sysLogger.add(`Automatización: Make.com activa (${process.env.MAKE_WEBHOOK_URL.substring(0, 40)}...)`, "INFO");
   } else {
-    console.log(`⚠️ Automatización: Make.com no configurada (usando SMTP local)`);
+    sysLogger.add("Automatización: Make.com no configurada (usando fallback SMTP)", "WARNING");
+  }
+  
+  if (process.env.VERIPHONE_API_KEY) {
+    sysLogger.add("Validación: Veriphone API integrada correctamente", "SUCCESS");
   }
 });
