@@ -1187,6 +1187,21 @@ router.post("/me/conversaciones/:conversacionId/mensajes", requireAuth, async (r
       });
     }
 
+    if (senderType === "paciente") {
+      const citaResult = await client.query(
+        "SELECT estado_codigo FROM cita WHERE citaid::text = $1::text",
+        [conversation.citaid]
+      );
+      const citaEstado = normalizeComparableText(citaResult.rows[0]?.estado_codigo);
+      if (!ACTIVE_CITA_CODES.includes(citaEstado)) {
+        await client.query("ROLLBACK");
+        return res.status(403).json({
+          success: false,
+          message: "Solo puedes enviar mensajes durante una consulta activa.",
+        });
+      }
+    }
+
     const insert = await client.query(
       `INSERT INTO mensajes (
          mensajeid,
