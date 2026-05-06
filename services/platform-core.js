@@ -649,19 +649,36 @@ function validateModalidadForEspecialidad(especialidadRow, modalidad) {
 
 async function hasCitaConflict(
   client,
-  { medicoId, startIso, endIso, excludeCitaId = "" }
+  { medicoId, pacienteId, startIso, endIso, excludeCitaId = "" }
 ) {
+  const params = [startIso, endIso, String(excludeCitaId || "")];
+  const conditions = [
+    "c.fechahorainicio < $2::timestamptz",
+    "c.fechahorafin > $1::timestamptz",
+    "lower(coalesce(c.estado_codigo, 'pendiente')) IN ('pendiente', 'confirmada', 'reprogramada')",
+    "($3::text = '' OR c.citaid::text <> $3::text)"
+  ];
+
+  if (medicoId && pacienteId) {
+    params.push(String(medicoId), Number(pacienteId));
+    conditions.push(`(c.medicoid::text = $4::text OR c.pacienteid = $5)`);
+  } else if (medicoId) {
+    params.push(String(medicoId));
+    conditions.push(`c.medicoid::text = $4::text`);
+  } else if (pacienteId) {
+    params.push(Number(pacienteId));
+    conditions.push(`c.pacienteid = $4`);
+  } else {
+    return false;
+  }
+
   const result = await client.query(
     `SELECT c.citaid::text AS citaid
      FROM cita c
-     WHERE c.medicoid::text = $1::text
-       AND c.fechahorainicio < $3::timestamptz
-       AND c.fechahorafin > $2::timestamptz
-       AND lower(coalesce(c.estado_codigo, 'pendiente')) IN ('pendiente', 'confirmada', 'reprogramada')
-       AND ($4::text = '' OR c.citaid::text <> $4::text)
+     WHERE ${conditions.join(" AND ")}
      LIMIT 1
      FOR UPDATE`,
-    [String(medicoId), startIso, endIso, String(excludeCitaId || "")]
+    params
   );
   return Boolean(result.rows.length);
 }
@@ -1024,7 +1041,7 @@ function parseBlockDates({ fecha, horaInicio, horaFin, fechaInicio, fechaFin }) 
   return { start, end };
 }
 
-function buildSlots(availabilityRows, bookedRows, { modalidadFilter, fechaFilter }) {
+function buildSlots(availabilityRows, bookedRows, { modalidadFilter, fechaFilter, patientBookedRows = [] }) {
   const slots = [];
   const nowMs = Date.now();
   const normalizedFilterModalidad = normalizeModalidad(modalidadFilter, "");
@@ -1040,6 +1057,11 @@ function buildSlots(availabilityRows, bookedRows, { modalidadFilter, fechaFilter
     });
     bookedByMedico.set(key, list);
   }
+
+  const patientBusy = patientBookedRows.map(row => ({
+    start: new Date(row.fechahorainicio),
+    end: new Date(row.fechahorafin)
+  }));
 
   for (const row of availabilityRows) {
     const rowStart = new Date(row.fechainicio);
@@ -1067,10 +1089,15 @@ function buildSlots(availabilityRows, bookedRows, { modalidadFilter, fechaFilter
       if (pointer.getTime() > nowMs) {
         const candidateDate = pointer.toISOString().slice(0, 10);
         if (!hasFechaFilter || candidateDate === fechaFilter) {
-          const overlaps = bookedForMedico.some((b) =>
+          const overlapsMedico = bookedForMedico.some((b) =>
             slotOverlaps(pointer, next, b.start, b.end)
           );
-          if (!overlaps) {
+          
+          const overlapsPatient = patientBusy.some(b => 
+            slotOverlaps(pointer, next, b.start, b.end)
+          );
+
+          if (!overlapsMedico && !overlapsPatient) {
             slots.push({
               disponibilidadId: String(row.horariodisponibleid || ""),
               medicoId: String(row.medicoid || ""),

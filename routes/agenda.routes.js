@@ -229,9 +229,26 @@ router.get("/disponibilidades", requireAuth, async (req, res) => {
       bookedParams
     );
 
+    // Si el usuario es un paciente, buscamos sus citas activas para no ofrecerle horarios donde el ya este ocupado
+    let patientBookedRows = [];
+    if (context.roleId === PACIENTE_ROLE_ID) {
+      const pId = Number(context.paciente.pacienteid);
+      const patientBusyResult = await client.query(
+        `SELECT fechahorainicio, fechahorafin
+         FROM cita
+         WHERE pacienteid = $1
+           AND fechahorainicio < $3::timestamptz
+           AND fechahorafin > $2::timestamptz
+           AND lower(coalesce(estado_codigo, 'pendiente')) = ANY($4)`,
+        [pId, rangeStart, rangeEnd, ACTIVE_CITA_CODES]
+      );
+      patientBookedRows = patientBusyResult.rows;
+    }
+
     const slots = buildSlots(availabilityResult.rows, bookedResult.rows, {
       modalidadFilter: modalidad,
       fechaFilter: fecha,
+      patientBookedRows,
     });
 
     const resumenMap = new Map();

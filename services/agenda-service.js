@@ -744,6 +744,7 @@ async function createMyCita({
 
     const conflict = await hasCitaConflict(client, {
       medicoId,
+      pacienteId: Number(context.paciente.pacienteid),
       startIso: slotStart.toISOString(),
       endIso: slotEnd.toISOString(),
     });
@@ -751,7 +752,7 @@ async function createMyCita({
       await rollbackQuietly(client);
       return serviceResult(409, {
         success: false,
-        message: "Ese horario ya fue tomado por otro paciente.",
+        message: "No se puede agendar: El médico ya tiene una cita a esa hora o tú ya tienes otra cita programada para este mismo horario.",
       });
     }
 
