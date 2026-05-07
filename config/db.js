@@ -20,4 +20,9 @@ const pool = new Pool(
       }
 );
 
+// Manejador de errores para evitar que la app colapse ante desconexiones inesperadas del pooler (Supabase)
+pool.on("error", (err) => {
+  console.error("Error inesperado en cliente inactivo de base de datos:", err.message);
+});
+
 module.exports = pool;

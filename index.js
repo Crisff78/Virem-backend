@@ -48,6 +48,7 @@ pool.query("SELECT NOW()")
   });
 
 const PORT = process.env.PORT || 3000;
+
 initializeSocketServer(httpServer);
 
 // Reminder Service Loop

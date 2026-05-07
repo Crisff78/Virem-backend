@@ -21,6 +21,11 @@ function buildCorsOriginError(origin) {
 
 function createApp() {
     const app = express();
+    
+    app.use((req, res, next) => {
+        console.log(`\n🚀 [${new Date().toLocaleTimeString()}] LLEGÓ PETICIÓN: ${req.method} ${req.url}`);
+        next();
+    });
 
     const allowedOrigins = getAllowedCorsOrigins();
     const corsOptions = {
