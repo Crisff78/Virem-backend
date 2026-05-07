@@ -444,6 +444,18 @@ router.post("/medico/me/disponibilidades", requireAuth, async (req, res) => {
     }
 
     const zonaHorariaId = zoneIdRaw || (await resolveZonaHorariaId(client));
+    console.log("[POST disponibilidades] INSERT params:", {
+      medicoid: String(context.medico.medicoid),
+      zonaHorariaId,
+      start: start.toISOString(),
+      end: end.toISOString(),
+      activo,
+      nota: nota || null,
+      especialidadid: Number(especialidadRow.especialidadid),
+      modalidad: modeCheck.modalidad,
+      slotMinutos,
+      bloqueado,
+    });
     const insert = await client.query(
       `INSERT INTO horario_disponible (
          medicoid,
