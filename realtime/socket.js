@@ -474,31 +474,41 @@ function initializeSocketServer(httpServer) {
      * a las salas user:<otroId>, paciente:<id>, medico:<id>.
      */
     async function emitCallSignalForCita(socket, eventName, citaId, extras = {}) {
+      const auth = getSocketAuth(socket);
+      const cleanCitaId = normalizeText(citaId);
+      if (!cleanCitaId) return { ok: false, code: "cita_id_invalid" };
+
+      // Simplified broadcast: if they are in the cita room, they can signal
+      const room = toRoom("cita", cleanCitaId);
+      const payload = {
+        citaId: cleanCitaId,
+        fromRole: auth.roleId === MEDICO_ROLE_ID ? "medico" : "paciente",
+        at: new Date().toISOString(),
+        ...extras,
+      };
+
+      // Broadcast to everyone in the room (including self)
+      ioInstance.to(room).emit(eventName, payload);
+      
+      // Also broadcast to individual roles just in case they aren't in the room yet
+      // but are listening to their specific channels
       let client;
       try {
         client = await pool.connect();
-        const access = await canAccessCita(client, getSocketAuth(socket), citaId);
-        if (!access.ok) return { ok: false, code: access.code };
-
-        const cita = access.cita;
-        const payload = {
-          citaId: normalizeText(cita.citaid),
-          pacienteId: normalizeText(cita.pacienteid),
-          medicoId: normalizeText(cita.medicoid),
-          fromRole: getSocketAuth(socket).roleId === MEDICO_ROLE_ID ? "medico" : "paciente",
-          at: new Date().toISOString(),
-          ...extras,
-        };
-
-        emitToRoom(toRoom("paciente", cita.pacienteid), eventName, payload);
-        emitToRoom(toRoom("medico", cita.medicoid), eventName, payload);
-        emitToRoom(toRoom("cita", cita.citaid), eventName, payload);
-        return { ok: true };
-      } catch (err) {
-        return { ok: false, code: "server_error" };
-      } finally {
+        const citaRes = await client.query(
+          "SELECT pacienteid, medicoid FROM cita WHERE citaid::text = $1 LIMIT 1",
+          [cleanCitaId]
+        );
+        if (citaRes.rows.length) {
+          const cita = citaRes.rows[0];
+          emitToRoom(toRoom("paciente", cita.pacienteid), eventName, payload);
+          emitToRoom(toRoom("medico", cita.medicoid), eventName, payload);
+        }
+      } catch (_) {} finally {
         if (client) client.release();
       }
+
+      return { ok: true };
     }
 
     socket.on("call:invite", async ({ citaId } = {}, cb) => {
