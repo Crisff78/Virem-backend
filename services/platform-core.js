@@ -1161,12 +1161,15 @@ function canJoinVideoRoom({ citaStart, roomEstado, roleId }) {
 
   const now = Date.now();
   const startMs = start.getTime();
-  const preJoinWindowMs = 60 * 1000; // 1 minute buffer for patients
+  
+  // New: Patients can join up to 10 minutes before start
+  const preJoinWindowMs = 10 * 60 * 1000; 
   const postWindowMs = 6 * 60 * 60 * 1000; // 6 hours window
 
   if (roleId === MEDICO_ROLE_ID) return now <= startMs + postWindowMs;
   if (roleId === PACIENTE_ROLE_ID) {
-    return now >= startMs - preJoinWindowMs && now <= startMs + postWindowMs;
+    // Also allow if room is already active regardless of time (handled by status check usually, but buffer helps)
+    return (now >= startMs - preJoinWindowMs) && (now <= startMs + postWindowMs);
   }
   return now >= startMs - preJoinWindowMs && now <= startMs + postWindowMs;
 }
