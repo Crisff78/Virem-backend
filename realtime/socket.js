@@ -535,6 +535,25 @@ function initializeSocketServer(httpServer) {
         mic: typeof mic === "boolean" ? mic : null,
         camera: typeof camera === "boolean" ? camera : null,
       });
+      // If the sender is a patient, also notify the doctor that patient is in the sala
+      const auth = getSocketAuth(socket);
+      if (auth.roleId === PACIENTE_ROLE_ID && result.ok) {
+        let client;
+        try {
+          client = await pool.connect();
+          const access = await canAccessCita(client, auth, citaId);
+          if (access.ok && access.cita) {
+            emitToRoom(toRoom("medico", access.cita.medicoid), "patient:in_sala", {
+              citaId: normalizeText(access.cita.citaid),
+              pacienteId: normalizeText(access.cita.pacienteid),
+              at: new Date().toISOString(),
+            });
+          }
+        } catch (_) {
+        } finally {
+          if (client) client.release();
+        }
+      }
       respondToSocketAction(cb, result);
     });
 
