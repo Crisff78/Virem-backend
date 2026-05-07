@@ -894,17 +894,24 @@ async function createMyCita({
     try {
       if (citaPayload) {
         const invoiceData = {
+          type: "invoice_generated",
           citaId: citaPayload.citaid,
           pacienteNombre: citaPayload.paciente.nombreCompleto,
           medicoNombre: citaPayload.medico.nombreCompleto,
           especialidad: citaPayload.medico.especialidad,
           fecha: citaPayload.fechaHoraInicio,
-          montoTotal: citaPayload.montoTotal,
+          monto: citaPayload.montoTotal,
           referencia: citaPayload.pagoReferencia,
           modalidad: citaPayload.modalidad,
+          pacienteEmail: context.user.email,
         };
 
-        const html = invoiceService.generateInvoiceHTML(invoiceData);
+        const html = invoiceService.generateInvoiceHTML({
+          ...invoiceData,
+          montoTotal: invoiceData.monto,
+        });
+
+        console.log("[Automation] Sending invoice data to Make.com:", invoiceData);
         
         // 1. Internal Email delivery
         if (context.user.email) {
@@ -917,11 +924,8 @@ async function createMyCita({
 
         // 2. Make.com / n8n Webhook trigger
         if (process.env.MAKE_WEBHOOK_URL) {
-          axios.post(process.env.MAKE_WEBHOOK_URL, {
-            type: "invoice_generated",
-            ...invoiceData,
-            pacienteEmail: context.user.email,
-          }).catch(e => console.warn("[Webhook] Invoice webhook failed:", e.message));
+          axios.post(process.env.MAKE_WEBHOOK_URL, invoiceData)
+            .catch(e => console.warn("[Webhook] Invoice webhook failed:", e.message));
         }
       } else {
         console.warn("[Automation] Skip invoice generation: citaPayload is null");
