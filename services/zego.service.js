@@ -128,7 +128,8 @@ function generateZegoRtcToken({
 function getZegoConfig() {
   try {
     const { appId } = ensureConfigured();
-    return { appId };
+    const server = process.env.ZEGO_SERVER || `wss://webliveroom${appId}-api.zegocloud.com/ws`;
+    return { appId, server };
   } catch {
     return null;
   }

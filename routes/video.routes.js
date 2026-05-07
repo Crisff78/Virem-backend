@@ -241,6 +241,7 @@ router.post("/me/citas/:citaId/token", requireAuth, async (req, res) => {
       provider: "zego",
       zego: {
         appId: cfg.appId,
+        server: cfg.server,
         token,
         roomId,
         userId,

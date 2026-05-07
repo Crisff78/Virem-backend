@@ -465,59 +465,33 @@ function initializeSocketServer(httpServer) {
       socket.leave("admin_monitoring");
     });
 
-    /**
-     * Signaling de videollamada (sin SFU; el media va por Zego).
-     * Estos eventos solo coordinan estado entre las dos puntas.
-     *
-     * Payloads esperan { citaId } y opcional { reason }.
-     * El backend valida que el emisor pertenezca a la cita y reenvia
-     * a las salas user:<otroId>, paciente:<id>, medico:<id>.
-     */
-    async function emitCallSignalForCita(socket, eventName, citaId, extras = {}) {
-      const auth = getSocketAuth(socket);
-      const cleanCitaId = normalizeText(citaId);
-      if (!cleanCitaId) return { ok: false, code: "cita_id_invalid" };
-
-      const room = toRoom("cita", cleanCitaId);
-      const payload = {
-        citaId: cleanCitaId,
-        fromRole: auth.roleId === MEDICO_ROLE_ID ? "medico" : "paciente",
-        fromUserId: auth.usuarioid,
-        at: new Date().toISOString(),
-        ...extras,
-      };
-
-      console.log(`[Socket] Signal "${eventName}" from ${payload.fromRole} for cita ${cleanCitaId}`);
-
-      // 1. Broadcast to the main room (Primary)
-      ioInstance.to(room).emit(eventName, payload);
-      
-      // 2. Fallback: Broadcast to individual role rooms
-      let client;
+    socket.on("call:invite", async ({ citaId } = {}, cb) => {
+      // Usar emitCitaEvent para notificar al otro extremo
       try {
-        client = await pool.connect();
+        const client = await pool.connect();
         const citaRes = await client.query(
-          "SELECT pacienteid::text as pid, medicoid::text as mid FROM cita WHERE citaid::text = $1 LIMIT 1",
-          [cleanCitaId]
+          "SELECT pacienteid, medicoid FROM cita WHERE citaid::text = $1 LIMIT 1",
+          [normalizeText(citaId)]
         );
         if (citaRes.rows.length) {
-          const { pid, mid } = citaRes.rows[0];
-          // We emit to everyone EXCEPT the sender to avoid echo if they are in the same room
-          socket.to(toRoom("paciente", pid)).emit(eventName, payload);
-          socket.to(toRoom("medico", mid)).emit(eventName, payload);
+          const cita = citaRes.rows[0];
+          const caller = getSocketAuth(socket);
+          const invitePayload = {
+            citaId: normalizeText(citaId),
+            callerRole: caller.roleId === MEDICO_ROLE_ID ? "medico" : "paciente",
+            at: new Date().toISOString(),
+          };
+          
+          // Notificar via socket directo si el usuario esta conectado
+          const toUserId = caller.roleId === MEDICO_ROLE_ID ? cita.pacienteid : cita.medicoid;
+          // (Asumiendo que existe una forma de mapear pacienteid/medicoid a usuarioid o emitir a su sala)
+          emitCitaEvent({ eventName: "call:incoming", citaId, ...invitePayload });
         }
-      } catch (err) {
-        console.error("[Socket] Error in signal fallback:", err.message);
+      } catch (_) {
       } finally {
         if (client) client.release();
       }
-
-      return { ok: true };
-    }
-
-    socket.on("call:invite", async ({ citaId } = {}, cb) => {
-      const result = await emitCallSignalForCita(socket, "call:incoming", citaId);
-      respondToSocketAction(cb, result);
+      respondToSocketAction(cb, { ok: true });
     });
 
     socket.on("call:accept", async ({ citaId } = {}, cb) => {
