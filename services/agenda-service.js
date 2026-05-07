@@ -766,7 +766,6 @@ async function createMyCita({
     }
 
     const tipoConsultaId = await resolveTipoConsultaId(client, modalidad);
-    const citaId = randomUUID();
     const insertResult = await client.query(
       `INSERT INTO cita (
          citaid,
