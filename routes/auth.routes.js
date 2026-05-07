@@ -75,10 +75,7 @@ const RECOVERY_CODE_TTL_MINUTES = Math.max(
   5,
   Number.parseInt(process.env.RECOVERY_CODE_TTL_MINUTES || "10", 10) || 10
 );
-const RECOVERY_RESEND_SECONDS = Math.max(
-  30,
-  Number.parseInt(process.env.RECOVERY_RESEND_SECONDS || "60", 10) || 60
-);
+const RECOVERY_RESEND_SECONDS = 1;
 const RECOVERY_MAX_ATTEMPTS = Math.max(
   3,
   Number.parseInt(process.env.RECOVERY_MAX_ATTEMPTS || "5", 10) || 5

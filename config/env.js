@@ -84,7 +84,7 @@ function getGlobalRateLimitConfig() {
     const max = Number.parseInt(process.env.GLOBAL_RATE_LIMIT_MAX || "1000", 10);
     return {
         windowMs: Number.isFinite(windowMs) && windowMs > 0 ? windowMs : 60000,
-        max: Number.isFinite(max) && max > 0 ? max : 1000,
+        max: Number.isFinite(max) && max > 0 ? max : 5000,
     };
 }
 
