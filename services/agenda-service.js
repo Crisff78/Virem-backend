@@ -892,35 +892,39 @@ async function createMyCita({
 
     // --- Post-creation Automation: Invoice & Email ---
     try {
-      const invoiceData = {
-        citaId: citaPayload.citaid,
-        pacienteNombre: citaPayload.paciente.nombreCompleto,
-        medicoNombre: citaPayload.medico.nombreCompleto,
-        especialidad: citaPayload.medico.especialidad,
-        fecha: citaPayload.fechaHoraInicio,
-        montoTotal: citaPayload.montoTotal,
-        referencia: citaPayload.pagoReferencia,
-        modalidad: citaPayload.modalidad,
-      };
+      if (citaPayload) {
+        const invoiceData = {
+          citaId: citaPayload.citaid,
+          pacienteNombre: citaPayload.paciente.nombreCompleto,
+          medicoNombre: citaPayload.medico.nombreCompleto,
+          especialidad: citaPayload.medico.especialidad,
+          fecha: citaPayload.fechaHoraInicio,
+          montoTotal: citaPayload.montoTotal,
+          referencia: citaPayload.pagoReferencia,
+          modalidad: citaPayload.modalidad,
+        };
 
-      const html = invoiceService.generateInvoiceHTML(invoiceData);
-      
-      // 1. Internal Email delivery
-      if (context.user.email) {
-        emailService.sendEmail({
-          to: context.user.email,
-          subject: `Tu Comprobante de Pago - VIREM (${invoiceData.citaId.slice(0, 8).toUpperCase()})`,
-          html,
-        }).catch(e => console.error("[EmailService] Background sending failed:", e));
-      }
+        const html = invoiceService.generateInvoiceHTML(invoiceData);
+        
+        // 1. Internal Email delivery
+        if (context.user.email) {
+          emailService.sendEmail({
+            to: context.user.email,
+            subject: `Tu Comprobante de Pago - VIREM (${invoiceData.citaId.slice(0, 8).toUpperCase()})`,
+            html,
+          }).catch(e => console.error("[EmailService] Background sending failed:", e));
+        }
 
-      // 2. Make.com / n8n Webhook trigger
-      if (process.env.MAKE_WEBHOOK_URL) {
-        axios.post(process.env.MAKE_WEBHOOK_URL, {
-          type: "invoice_generated",
-          ...invoiceData,
-          pacienteEmail: context.user.email,
-        }).catch(e => console.warn("[Webhook] Invoice webhook failed:", e.message));
+        // 2. Make.com / n8n Webhook trigger
+        if (process.env.MAKE_WEBHOOK_URL) {
+          axios.post(process.env.MAKE_WEBHOOK_URL, {
+            type: "invoice_generated",
+            ...invoiceData,
+            pacienteEmail: context.user.email,
+          }).catch(e => console.warn("[Webhook] Invoice webhook failed:", e.message));
+        }
+      } else {
+        console.warn("[Automation] Skip invoice generation: citaPayload is null");
       }
     } catch (err) {
       console.error("[Automation] Error in post-creation flow:", err);
