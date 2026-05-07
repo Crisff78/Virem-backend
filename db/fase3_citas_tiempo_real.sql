@@ -122,7 +122,7 @@ BEGIN
   ) THEN
     ALTER TABLE horario_disponible
       ADD CONSTRAINT chk_horario_slot_minutos
-      CHECK (slot_minutos IN (15, 20, 30, 60));
+      CHECK (slot_minutos > 0);
   END IF;
 END $$;
 

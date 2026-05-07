@@ -129,6 +129,9 @@ function createApp() {
     const recetasRoutes = require('./routes/recetas.routes.js');
     app.use('/api', recetasRoutes);
 
+    const videoRoutes = require('./routes/video.routes.js');
+    app.use('/api/video', videoRoutes);
+
     app.use(notFoundHandler);
     app.use(errorHandler);
 

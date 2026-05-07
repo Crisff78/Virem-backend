@@ -10,6 +10,7 @@ const MIGRATIONS = [
   "db/fase4_optimizacion_agenda_chat_video.sql",
   "db/fase5_rf_funcionalidades_clinicas.sql",
   "db/fase6_vinculo_usuario_perfiles.sql",
+  "db/fase8_chat_por_pareja.sql",
 ];
 
 async function getCitaPacienteColumnType(client) {

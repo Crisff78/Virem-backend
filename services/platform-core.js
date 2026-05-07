@@ -237,13 +237,13 @@ async function ensurePlatformSchema() {
     await pool.query(
       `CREATE TABLE IF NOT EXISTS conversaciones (
         conversacionid UUID PRIMARY KEY,
-        citaid UUID NOT NULL REFERENCES cita(citaid) ON DELETE CASCADE,
+        citaid_origen UUID REFERENCES cita(citaid) ON DELETE SET NULL,
         pacienteid INTEGER NOT NULL REFERENCES paciente(pacienteid) ON DELETE CASCADE,
         medicoid UUID NOT NULL REFERENCES medico(medicoid) ON DELETE CASCADE,
         estado VARCHAR(16) NOT NULL DEFAULT 'activa',
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        UNIQUE (citaid)
+        UNIQUE (pacienteid, medicoid)
       )`
     );
 
@@ -752,7 +752,7 @@ async function createNotification(
     // Try to get user contact info for the webhook
     try {
       const userResult = await client.query(
-        "SELECT email, telefono FROM usuario WHERE usuarioid = $1",
+        "SELECT email FROM usuario WHERE usuarioid = $1",
         [userId]
       );
       const userContact = userResult.rows[0] || {};
@@ -799,30 +799,62 @@ async function appendCitaHistorial(
 }
 
 async function ensureConversation(client, { citaId, pacienteId, medicoId }) {
+  const cleanPacienteId = Number.parseInt(String(pacienteId || ""), 10);
+  const cleanMedicoId = String(medicoId || "").trim();
+  const cleanCitaId = String(citaId || "").trim();
+
+  if (!Number.isFinite(cleanPacienteId) || cleanPacienteId <= 0 || !cleanMedicoId) {
+    throw new Error("ensureConversation: pacienteId y medicoId son obligatorios.");
+  }
+
   const existing = await client.query(
     `SELECT conversacionid::text AS conversacionid
      FROM conversaciones
-     WHERE citaid = $1::uuid
+     WHERE pacienteid = $1
+       AND medicoid::text = $2::text
      LIMIT 1`,
-    [String(citaId)]
+    [cleanPacienteId, cleanMedicoId]
   );
-  if (existing.rows.length) return String(existing.rows[0].conversacionid);
+  if (existing.rows.length) {
+    if (cleanCitaId) {
+      await client.query(
+        `UPDATE conversaciones
+            SET citaid_origen = COALESCE(citaid_origen, $1::uuid)
+          WHERE conversacionid::text = $2::text`,
+        [cleanCitaId, existing.rows[0].conversacionid]
+      );
+    }
+    return String(existing.rows[0].conversacionid);
+  }
 
   const newId = randomUUID();
   await client.query(
     `INSERT INTO conversaciones (
        conversacionid,
-       citaid,
+       citaid_origen,
        pacienteid,
        medicoid,
        estado,
        created_at,
        updated_at
      )
-     VALUES ($1::uuid, $2::uuid, $3, $4::uuid, 'activa', NOW(), NOW())`,
-    [newId, String(citaId), Number(pacienteId), String(medicoId)]
+     VALUES ($1::uuid, $2::uuid, $3, $4::uuid, 'activa', NOW(), NOW())
+     ON CONFLICT (pacienteid, medicoid) DO UPDATE
+       SET updated_at = NOW(),
+           citaid_origen = COALESCE(conversaciones.citaid_origen, EXCLUDED.citaid_origen)
+     RETURNING conversacionid::text AS conversacionid`,
+    [newId, cleanCitaId || null, cleanPacienteId, cleanMedicoId]
   );
-  return newId;
+
+  const recheck = await client.query(
+    `SELECT conversacionid::text AS conversacionid
+     FROM conversaciones
+     WHERE pacienteid = $1
+       AND medicoid::text = $2::text
+     LIMIT 1`,
+    [cleanPacienteId, cleanMedicoId]
+  );
+  return String(recheck.rows[0]?.conversacionid || newId);
 }
 
 async function appendSystemMessage(client, { conversacionId, text }) {

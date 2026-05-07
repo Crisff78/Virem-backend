@@ -29,6 +29,10 @@ const {
   buildCitaResponse,
 } = require("./platform-core");
 const { emitCitaEvent, emitConversationEvent } = require("../realtime/socket");
+const axios = require("axios");
+const emailService = require("./email-service");
+const invoiceService = require("./invoice-service");
+
 
 const REPROGRAMABLE_CODES = ["pendiente", "confirmada", "reprogramada"];
 const ROLE_BY_ID = {
@@ -258,7 +262,9 @@ async function listMyCitas({
          LEFT JOIN estado_cita ec ON ec.estadocitaid = c.estadocitaid
          LEFT JOIN medico m ON m.medicoid = c.medicoid
          LEFT JOIN especialidad e ON e.especialidadid = m.especialidadid
-         LEFT JOIN conversaciones conv ON conv.citaid = c.citaid
+         LEFT JOIN conversaciones conv
+           ON conv.pacienteid = c.pacienteid
+          AND conv.medicoid::text = c.medicoid::text
          LEFT JOIN LATERAL (
            SELECT up.foto_url
            FROM usuario_perfil up
@@ -331,7 +337,9 @@ async function listMyCitas({
          LEFT JOIN medico m ON m.medicoid = c.medicoid
          LEFT JOIN especialidad e ON e.especialidadid = m.especialidadid
          LEFT JOIN paciente p ON p.pacienteid = c.pacienteid
-         LEFT JOIN conversaciones conv ON conv.citaid = c.citaid
+         LEFT JOIN conversaciones conv
+           ON conv.pacienteid = c.pacienteid
+          AND conv.medicoid::text = c.medicoid::text
          WHERE c.medicoid::text = $1::text
            AND ${scopeWhere}
          ORDER BY ${orderBy}
@@ -517,6 +525,7 @@ async function createMyCita({
 
   let client;
   try {
+    const citaId = randomUUID();
     client = await pool.connect();
     await client.query("BEGIN");
 
@@ -757,7 +766,6 @@ async function createMyCita({
     }
 
     const tipoConsultaId = await resolveTipoConsultaId(client, modalidad);
-    const citaId = randomUUID();
     const insertResult = await client.query(
       `INSERT INTO cita (
          citaid,
@@ -882,6 +890,51 @@ async function createMyCita({
 
     await client.query("COMMIT");
 
+    // --- Post-creation Automation: Invoice & Email ---
+    try {
+      if (citaPayload) {
+        const invoiceData = {
+          type: "invoice_generated",
+          citaId: citaPayload.citaid,
+          pacienteNombre: citaPayload.paciente.nombreCompleto,
+          medicoNombre: citaPayload.medico.nombreCompleto,
+          especialidad: citaPayload.medico.especialidad,
+          fecha: citaPayload.fechaHoraInicio,
+          monto: citaPayload.montoTotal,
+          referencia: citaPayload.pagoReferencia,
+          modalidad: citaPayload.modalidad,
+          pacienteEmail: context.user.email,
+        };
+
+        const html = invoiceService.generateInvoiceHTML({
+          ...invoiceData,
+          montoTotal: invoiceData.monto,
+        });
+
+        console.log("[Automation] Sending invoice data to Make.com:", invoiceData);
+        
+        // 1. Internal Email delivery
+        if (context.user.email) {
+          emailService.sendEmail({
+            to: context.user.email,
+            subject: `Tu Comprobante de Pago - VIREM (${invoiceData.citaId.slice(0, 8).toUpperCase()})`,
+            html,
+          }).catch(e => console.error("[EmailService] Background sending failed:", e));
+        }
+
+        // 2. Make.com / n8n Webhook trigger
+        if (process.env.MAKE_WEBHOOK_URL) {
+          axios.post(process.env.MAKE_WEBHOOK_URL, invoiceData)
+            .catch(e => console.warn("[Webhook] Invoice webhook failed:", e.message));
+        }
+      } else {
+        console.warn("[Automation] Skip invoice generation: citaPayload is null");
+      }
+    } catch (err) {
+      console.error("[Automation] Error in post-creation flow:", err);
+    }
+
+
     emitCitaEvent({
       eventName: "cita_creada",
       citaId,
@@ -924,6 +977,9 @@ async function createMyCita({
     }
 
     console.error("Error createMyCita:", err);
+    if (err.detail) console.error("[DB Detail]:", err.detail);
+    if (err.hint) console.error("[DB Hint]:", err.hint);
+    if (err.stack) console.error("[Stack]:", err.stack);
     return serviceResult(500, {
       success: false,
       message: "No se pudo crear la cita.",

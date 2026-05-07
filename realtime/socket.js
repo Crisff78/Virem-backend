@@ -176,7 +176,7 @@ async function canAccessConversation(client, auth, conversationId) {
     const result = await client.query(
       `SELECT
          conv.conversacionid::text AS conversacionid,
-         conv.citaid::text AS citaid,
+         conv.citaid_origen::text AS citaid,
          conv.pacienteid::text AS pacienteid,
          conv.medicoid::text AS medicoid
        FROM conversaciones conv
@@ -197,7 +197,7 @@ async function canAccessConversation(client, auth, conversationId) {
     const result = await client.query(
       `SELECT
          conv.conversacionid::text AS conversacionid,
-         conv.citaid::text AS citaid,
+         conv.citaid_origen::text AS citaid,
          conv.pacienteid::text AS pacienteid,
          conv.medicoid::text AS medicoid
        FROM conversaciones conv
@@ -463,6 +463,131 @@ function initializeSocketServer(httpServer) {
 
     socket.on("leave:admin_monitoring", () => {
       socket.leave("admin_monitoring");
+    });
+
+    /**
+     * Signaling de videollamada (sin SFU; el media va por Zego).
+     * Estos eventos solo coordinan estado entre las dos puntas.
+     *
+     * Payloads esperan { citaId } y opcional { reason }.
+     * El backend valida que el emisor pertenezca a la cita y reenvia
+     * a las salas user:<otroId>, paciente:<id>, medico:<id>.
+     */
+    async function emitCallSignalForCita(socket, eventName, citaId, extras = {}) {
+      let client;
+      try {
+        client = await pool.connect();
+        const access = await canAccessCita(client, getSocketAuth(socket), citaId);
+        if (!access.ok) return { ok: false, code: access.code };
+
+        const cita = access.cita;
+        const payload = {
+          citaId: normalizeText(cita.citaid),
+          pacienteId: normalizeText(cita.pacienteid),
+          medicoId: normalizeText(cita.medicoid),
+          fromRole: getSocketAuth(socket).roleId === MEDICO_ROLE_ID ? "medico" : "paciente",
+          at: new Date().toISOString(),
+          ...extras,
+        };
+
+        emitToRoom(toRoom("paciente", cita.pacienteid), eventName, payload);
+        emitToRoom(toRoom("medico", cita.medicoid), eventName, payload);
+        emitToRoom(toRoom("cita", cita.citaid), eventName, payload);
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, code: "server_error" };
+      } finally {
+        if (client) client.release();
+      }
+    }
+
+    socket.on("call:invite", async ({ citaId } = {}, cb) => {
+      const result = await emitCallSignalForCita(socket, "call:incoming", citaId);
+      respondToSocketAction(cb, result);
+    });
+
+    socket.on("call:accept", async ({ citaId } = {}, cb) => {
+      const result = await emitCallSignalForCita(socket, "call:accepted", citaId);
+      respondToSocketAction(cb, result);
+    });
+
+    socket.on("call:reject", async ({ citaId, reason } = {}, cb) => {
+      const result = await emitCallSignalForCita(socket, "call:rejected", citaId, {
+        reason: normalizeText(reason) || "rejected",
+      });
+      respondToSocketAction(cb, result);
+    });
+
+    socket.on("call:end", async ({ citaId, reason } = {}, cb) => {
+      const result = await emitCallSignalForCita(socket, "call:ended", citaId, {
+        reason: normalizeText(reason) || "ended",
+      });
+      respondToSocketAction(cb, result);
+    });
+
+    socket.on("call:cancel", async ({ citaId } = {}, cb) => {
+      const result = await emitCallSignalForCita(socket, "call:cancelled", citaId);
+      respondToSocketAction(cb, result);
+    });
+
+    socket.on("call:media-state", async ({ citaId, mic, camera } = {}, cb) => {
+      const result = await emitCallSignalForCita(socket, "call:media-state", citaId, {
+        mic: typeof mic === "boolean" ? mic : null,
+        camera: typeof camera === "boolean" ? camera : null,
+      });
+      // If the sender is a patient, also notify the doctor that patient is in the sala
+      const auth = getSocketAuth(socket);
+      if (auth.roleId === PACIENTE_ROLE_ID && result.ok) {
+        let client;
+        try {
+          client = await pool.connect();
+          const access = await canAccessCita(client, auth, citaId);
+          if (access.ok && access.cita) {
+            emitToRoom(toRoom("medico", access.cita.medicoid), "patient:in_sala", {
+              citaId: normalizeText(access.cita.citaid),
+              pacienteId: normalizeText(access.cita.pacienteid),
+              at: new Date().toISOString(),
+            });
+          }
+        } catch (_) {
+        } finally {
+          if (client) client.release();
+        }
+      }
+      respondToSocketAction(cb, result);
+    });
+
+    /**
+     * WebRTC peer-to-peer signaling relay (web video path).
+     *
+     * Estos eventos retransmiten el handshake WebRTC (SDP offer/answer e ICE candidates)
+     * entre los dos participantes. El backend valida que el emisor pertenezca a la cita
+     * y reenvía a los rooms paciente:, medico: y cita: correspondientes.
+     *
+     * Flujo:
+     *   receiver (initiate=false) → rtc:ready   → initiator recibe → envia rtc:offer
+     *   initiator                → rtc:offer   → receiver recibe → crea answer → rtc:answer
+     *   initiator                → rtc:answer  → initiator setRemoteDescription
+     *   ambos lados              → rtc:ice     → addIceCandidate en el otro extremo
+     */
+    socket.on("rtc:ready", async ({ citaId } = {}, cb) => {
+      const result = await emitCallSignalForCita(socket, "rtc:ready", citaId);
+      respondToSocketAction(cb, result);
+    });
+
+    socket.on("rtc:offer", async ({ citaId, offer } = {}, cb) => {
+      const result = await emitCallSignalForCita(socket, "rtc:offer", citaId, { offer });
+      respondToSocketAction(cb, result);
+    });
+
+    socket.on("rtc:answer", async ({ citaId, answer } = {}, cb) => {
+      const result = await emitCallSignalForCita(socket, "rtc:answer", citaId, { answer });
+      respondToSocketAction(cb, result);
+    });
+
+    socket.on("rtc:ice", async ({ citaId, candidate } = {}, cb) => {
+      const result = await emitCallSignalForCita(socket, "rtc:ice", citaId, { candidate });
+      respondToSocketAction(cb, result);
     });
 
     socket.on("disconnect", () => {
