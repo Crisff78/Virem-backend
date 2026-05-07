@@ -176,7 +176,7 @@ async function canAccessConversation(client, auth, conversationId) {
     const result = await client.query(
       `SELECT
          conv.conversacionid::text AS conversacionid,
-         conv.citaid::text AS citaid,
+         conv.citaid_origen::text AS citaid,
          conv.pacienteid::text AS pacienteid,
          conv.medicoid::text AS medicoid
        FROM conversaciones conv
@@ -197,7 +197,7 @@ async function canAccessConversation(client, auth, conversationId) {
     const result = await client.query(
       `SELECT
          conv.conversacionid::text AS conversacionid,
-         conv.citaid::text AS citaid,
+         conv.citaid_origen::text AS citaid,
          conv.pacienteid::text AS pacienteid,
          conv.medicoid::text AS medicoid
        FROM conversaciones conv

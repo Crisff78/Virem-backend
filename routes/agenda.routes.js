@@ -81,16 +81,26 @@ async function fetchConversationForContext(client, { conversacionId, context, lo
   const result = await client.query(
     `SELECT
        conv.conversacionid::text AS conversacionid,
-       conv.citaid::text AS citaid,
+       conv.citaid_origen::text AS citaid_origen,
        conv.pacienteid::text AS pacienteid,
        conv.medicoid::text AS medicoid,
        conv.estado,
        conv.updated_at,
        p.usuarioid AS paciente_usuarioid,
-       m.usuarioid AS medico_usuarioid
+       m.usuarioid AS medico_usuarioid,
+       latest_cita.citaid::text AS latest_citaid,
+       latest_cita.estado_codigo AS latest_estado_codigo
      FROM conversaciones conv
      LEFT JOIN paciente p ON p.pacienteid = conv.pacienteid
      LEFT JOIN medico m ON m.medicoid = conv.medicoid
+     LEFT JOIN LATERAL (
+       SELECT citaid, estado_codigo, fechahorainicio
+       FROM cita
+       WHERE pacienteid = conv.pacienteid
+         AND medicoid::text = conv.medicoid::text
+       ORDER BY fechahorainicio DESC NULLS LAST
+       LIMIT 1
+     ) latest_cita ON TRUE
      WHERE ${where.join(" AND ")}
      LIMIT 1
      ${lock ? "FOR UPDATE OF conv" : ""}`,
@@ -98,6 +108,18 @@ async function fetchConversationForContext(client, { conversacionId, context, lo
   );
 
   return result.rows[0] || null;
+}
+
+async function pacienteHasCitaWithMedico(client, { pacienteId, medicoId }) {
+  const result = await client.query(
+    `SELECT 1
+       FROM cita
+      WHERE pacienteid = $1
+        AND medicoid::text = $2::text
+      LIMIT 1`,
+    [Number(pacienteId), String(medicoId)]
+  );
+  return result.rows.length > 0;
 }
 
 // Schema is now initialized at startup in index.js
@@ -927,6 +949,88 @@ router.patch("/me/citas/:citaId/estado", requireAuth, async (req, res) => {
   return res.status(result.status).json(result.body);
 });
 
+router.post("/me/conversaciones", requireAuth, async (req, res) => {
+  const targetMedicoId = normalizeText(req.body?.medicoId);
+  const targetPacienteId = normalizeText(req.body?.pacienteId);
+
+  let client;
+  try {
+    client = await pool.connect();
+    const context = await resolveUserContext(client, req.user);
+    if (context.error) {
+      return res
+        .status(context.error.status)
+        .json({ success: false, message: context.error.message });
+    }
+
+    let pacienteId = "";
+    let medicoId = "";
+
+    if (context.roleId === PACIENTE_ROLE_ID) {
+      if (!targetMedicoId) {
+        return res.status(400).json({ success: false, message: "medicoId es obligatorio." });
+      }
+      pacienteId = String(context.paciente.pacienteid);
+      medicoId = targetMedicoId;
+
+      const hasCita = await pacienteHasCitaWithMedico(client, { pacienteId, medicoId });
+      if (!hasCita) {
+        return res.status(403).json({
+          success: false,
+          message:
+            "No puedes iniciar un chat con este medico hasta tener una consulta registrada.",
+        });
+      }
+    } else if (context.roleId === MEDICO_ROLE_ID) {
+      if (!targetPacienteId) {
+        return res
+          .status(400)
+          .json({ success: false, message: "pacienteId es obligatorio." });
+      }
+      pacienteId = targetPacienteId;
+      medicoId = String(context.medico.medicoid);
+
+      const pacienteRow = await client.query(
+        "SELECT pacienteid FROM paciente WHERE pacienteid = $1 LIMIT 1",
+        [Number(pacienteId)]
+      );
+      if (!pacienteRow.rows.length) {
+        return res
+          .status(404)
+          .json({ success: false, message: "Paciente no encontrado." });
+      }
+    } else {
+      return res.status(403).json({
+        success: false,
+        message: "Solo pacientes o medicos pueden iniciar conversaciones.",
+      });
+    }
+
+    const conversacionId = await ensureConversation(client, {
+      citaId: null,
+      pacienteId,
+      medicoId,
+    });
+
+    return res.status(200).json({
+      success: true,
+      conversacion: {
+        conversacionId,
+        pacienteId: String(pacienteId),
+        medicoId: String(medicoId),
+      },
+    });
+  } catch (err) {
+    console.error("Error POST /agenda/me/conversaciones:", err);
+    return res.status(500).json({
+      success: false,
+      message: "No se pudo iniciar la conversacion.",
+    });
+  } finally {
+    if (client) client.release();
+  }
+});
+
 router.get("/me/conversaciones", requireAuth, async (req, res) => {
   const limit = clampInt(req.query?.limit, 1, 100, 40);
 
@@ -962,31 +1066,39 @@ router.get("/me/conversaciones", requireAuth, async (req, res) => {
     const result = await client.query(
       `SELECT
          conv.conversacionid::text AS conversacionid,
-         conv.citaid::text AS citaid,
+         conv.citaid_origen::text AS citaid_origen,
          conv.pacienteid::text AS pacienteid,
          conv.medicoid::text AS medicoid,
          conv.estado,
          conv.updated_at,
-         c.fechahorainicio,
-         c.modalidad,
-         c.estado_codigo,
+         latest_cita.citaid::text AS latest_citaid,
+         latest_cita.fechahorainicio AS latest_fechahorainicio,
+         latest_cita.modalidad AS latest_modalidad,
+         latest_cita.estado_codigo AS latest_estado_codigo,
          COALESCE(m.nombrecompleto, 'Medico') AS medico_nombre,
          COALESCE(e.nombre, 'Medicina General') AS especialidad_nombre,
          COALESCE(
            NULLIF(TRIM(COALESCE(p.nombres, '') || ' ' || COALESCE(p.apellidos, '')), ''),
            'Paciente'
          ) AS paciente_nombre,
-         latest.mensajeid,
-         latest.contenido AS ultimo_contenido,
-         latest.tipo AS ultimo_tipo,
-         latest.created_at AS ultimo_created_at,
-         latest.emisor_tipo AS ultimo_emisor_tipo,
+         latest_msg.mensajeid,
+         latest_msg.contenido AS ultimo_contenido,
+         latest_msg.tipo AS ultimo_tipo,
+         latest_msg.created_at AS ultimo_created_at,
+         latest_msg.emisor_tipo AS ultimo_emisor_tipo,
          unread.unread_count
        FROM conversaciones conv
-       JOIN cita c ON c.citaid = conv.citaid
        LEFT JOIN medico m ON m.medicoid = conv.medicoid
        LEFT JOIN especialidad e ON e.especialidadid = m.especialidadid
        LEFT JOIN paciente p ON p.pacienteid = conv.pacienteid
+       LEFT JOIN LATERAL (
+         SELECT citaid, fechahorainicio, modalidad, estado_codigo
+         FROM cita
+         WHERE pacienteid = conv.pacienteid
+           AND medicoid::text = conv.medicoid::text
+         ORDER BY fechahorainicio DESC NULLS LAST
+         LIMIT 1
+       ) latest_cita ON TRUE
        LEFT JOIN LATERAL (
          SELECT
            msg.mensajeid::text AS mensajeid,
@@ -998,7 +1110,7 @@ router.get("/me/conversaciones", requireAuth, async (req, res) => {
          WHERE msg.conversacionid = conv.conversacionid
          ORDER BY msg.created_at DESC
          LIMIT 1
-       ) latest ON TRUE
+       ) latest_msg ON TRUE
        LEFT JOIN LATERAL (
          SELECT COUNT(*)::int AS unread_count
          FROM mensajes msg
@@ -1016,15 +1128,19 @@ router.get("/me/conversaciones", requireAuth, async (req, res) => {
       success: true,
       conversaciones: result.rows.map((row) => ({
         conversacionId: normalizeText(row.conversacionid),
-        citaId: normalizeText(row.citaid),
+        citaId: normalizeText(row.latest_citaid),
+        citaIdOrigen: normalizeText(row.citaid_origen),
         estado: normalizeText(row.estado) || "activa",
         updatedAt: row.updated_at || null,
         unreadCount: Number(row.unread_count || 0),
-        cita: {
-          fechaHoraInicio: row.fechahorainicio || null,
-          modalidad: normalizeModalidad(row.modalidad, "presencial"),
-          estadoCodigo: normalizeEstadoCode(row.estado_codigo, "pendiente"),
-        },
+        cita: row.latest_citaid
+          ? {
+              citaId: normalizeText(row.latest_citaid),
+              fechaHoraInicio: row.latest_fechahorainicio || null,
+              modalidad: normalizeModalidad(row.latest_modalidad, "presencial"),
+              estadoCodigo: normalizeEstadoCode(row.latest_estado_codigo, "pendiente"),
+            }
+          : null,
         paciente: {
           pacienteid: normalizeText(row.pacienteid),
           nombreCompleto: normalizeText(row.paciente_nombre) || "Paciente",
@@ -1121,7 +1237,8 @@ router.get("/me/conversaciones/:conversacionId/mensajes", requireAuth, async (re
       success: true,
       conversacion: {
         conversacionId: normalizeText(conversation.conversacionid),
-        citaId: normalizeText(conversation.citaid),
+        citaId: normalizeText(conversation.latest_citaid),
+        citaIdOrigen: normalizeText(conversation.citaid_origen),
         pacienteId: normalizeText(conversation.pacienteid),
         medicoId: normalizeText(conversation.medicoid),
       },
@@ -1192,16 +1309,16 @@ router.post("/me/conversaciones/:conversacionId/mensajes", requireAuth, async (r
     }
 
     if (senderType === "paciente") {
-      const citaResult = await client.query(
-        "SELECT estado_codigo FROM cita WHERE citaid::text = $1::text",
-        [conversation.citaid]
-      );
-      const citaEstado = normalizeComparableText(citaResult.rows[0]?.estado_codigo);
-      if (!ACTIVE_CITA_CODES.includes(citaEstado)) {
+      const hasCita = await pacienteHasCitaWithMedico(client, {
+        pacienteId: conversation.pacienteid,
+        medicoId: conversation.medicoid,
+      });
+      if (!hasCita) {
         await client.query("ROLLBACK");
         return res.status(403).json({
           success: false,
-          message: "Solo puedes enviar mensajes durante una consulta activa.",
+          message:
+            "No puedes enviar mensajes a este medico hasta tener una consulta registrada.",
         });
       }
     }
@@ -1272,7 +1389,7 @@ router.post("/me/conversaciones/:conversacionId/mensajes", requireAuth, async (r
           contenido,
           data: {
             conversacionId,
-            citaId: conversation.citaid,
+            citaId: conversation.latest_citaid || null,
             pacienteId: conversation.pacienteid,
             medicoId: conversation.medicoid,
           },
@@ -1286,7 +1403,7 @@ router.post("/me/conversaciones/:conversacionId/mensajes", requireAuth, async (r
         contenido,
         data: {
           conversacionId,
-          citaId: conversation.citaid,
+          citaId: conversation.latest_citaid || null,
           pacienteId: conversation.pacienteid,
           medicoId: conversation.medicoid,
         },
@@ -1298,7 +1415,7 @@ router.post("/me/conversaciones/:conversacionId/mensajes", requireAuth, async (r
     emitConversationEvent({
       eventName: "mensaje_nuevo",
       conversacionId,
-      citaId: conversation.citaid,
+      citaId: conversation.latest_citaid || null,
       pacienteId: conversation.pacienteid,
       medicoId: conversation.medicoid,
       extraPayload: { mensaje: messagePayload },

@@ -427,7 +427,9 @@ router.get("/citas", async (req, res) => {
        LEFT JOIN paciente p ON p.pacienteid = c.pacienteid
        LEFT JOIN medico m ON m.medicoid = c.medicoid
        LEFT JOIN especialidad e ON e.especialidadid = m.especialidadid
-       LEFT JOIN conversaciones conv ON conv.citaid = c.citaid
+       LEFT JOIN conversaciones conv
+         ON conv.pacienteid = c.pacienteid
+        AND conv.medicoid::text = c.medicoid::text
        LEFT JOIN video_salas vs ON vs.citaid = c.citaid
        ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
        ORDER BY c.fechahorainicio ${forwardOrder ? "ASC" : "DESC"}
