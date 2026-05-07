@@ -525,6 +525,7 @@ async function createMyCita({
 
   let client;
   try {
+    const citaId = randomUUID();
     client = await pool.connect();
     await client.query("BEGIN");
 
@@ -973,6 +974,9 @@ async function createMyCita({
     }
 
     console.error("Error createMyCita:", err);
+    if (err.detail) console.error("[DB Detail]:", err.detail);
+    if (err.hint) console.error("[DB Hint]:", err.hint);
+    if (err.stack) console.error("[Stack]:", err.stack);
     return serviceResult(500, {
       success: false,
       message: "No se pudo crear la cita.",
