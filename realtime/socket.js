@@ -478,33 +478,37 @@ function initializeSocketServer(httpServer) {
       const cleanCitaId = normalizeText(citaId);
       if (!cleanCitaId) return { ok: false, code: "cita_id_invalid" };
 
-      // Simplified broadcast: if they are in the cita room, they can signal
       const room = toRoom("cita", cleanCitaId);
       const payload = {
         citaId: cleanCitaId,
         fromRole: auth.roleId === MEDICO_ROLE_ID ? "medico" : "paciente",
+        fromUserId: auth.usuarioid,
         at: new Date().toISOString(),
         ...extras,
       };
 
-      // Broadcast to everyone in the room (including self)
+      console.log(`[Socket] Signal "${eventName}" from ${payload.fromRole} for cita ${cleanCitaId}`);
+
+      // 1. Broadcast to the main room (Primary)
       ioInstance.to(room).emit(eventName, payload);
       
-      // Also broadcast to individual roles just in case they aren't in the room yet
-      // but are listening to their specific channels
+      // 2. Fallback: Broadcast to individual role rooms
       let client;
       try {
         client = await pool.connect();
         const citaRes = await client.query(
-          "SELECT pacienteid, medicoid FROM cita WHERE citaid::text = $1 LIMIT 1",
+          "SELECT pacienteid::text as pid, medicoid::text as mid FROM cita WHERE citaid::text = $1 LIMIT 1",
           [cleanCitaId]
         );
         if (citaRes.rows.length) {
-          const cita = citaRes.rows[0];
-          emitToRoom(toRoom("paciente", cita.pacienteid), eventName, payload);
-          emitToRoom(toRoom("medico", cita.medicoid), eventName, payload);
+          const { pid, mid } = citaRes.rows[0];
+          // We emit to everyone EXCEPT the sender to avoid echo if they are in the same room
+          socket.to(toRoom("paciente", pid)).emit(eventName, payload);
+          socket.to(toRoom("medico", mid)).emit(eventName, payload);
         }
-      } catch (_) {} finally {
+      } catch (err) {
+        console.error("[Socket] Error in signal fallback:", err.message);
+      } finally {
         if (client) client.release();
       }
 
