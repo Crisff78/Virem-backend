@@ -362,6 +362,38 @@ function emitMedicoPresence({ medicoId, online }) {
   });
 }
 
+/**
+ * Retransmite una señal de videollamada a los demás participantes de una cita.
+ * Valida primero que el socket emisor tenga permiso para acceder a dicha cita.
+ */
+async function emitCallSignalForCita(socket, eventName, citaId, extraPayload = {}) {
+  let client;
+  try {
+    client = await pool.connect();
+    const auth = getSocketAuth(socket);
+    const access = await canAccessCita(client, auth, citaId);
+    if (!access.ok) return access;
+
+    const cleanCitaId = normalizeText(citaId);
+    const payload = {
+      citaId: cleanCitaId,
+      senderUserId: auth.usuarioid,
+      senderRole: auth.roleId === PACIENTE_ROLE_ID ? "paciente" : "medico",
+      ...extraPayload,
+      at: new Date().toISOString(),
+    };
+
+    // Emitir a los demás en el room de la cita (socket.to excluye al emisor)
+    socket.to(toRoom("cita", cleanCitaId)).emit(eventName, payload);
+    
+    return { ok: true, citaId: cleanCitaId };
+  } catch (err) {
+    return { ok: false, code: "server_error" };
+  } finally {
+    if (client) client.release();
+  }
+}
+
 function initializeSocketServer(httpServer) {
   if (ioInstance) return ioInstance;
 
