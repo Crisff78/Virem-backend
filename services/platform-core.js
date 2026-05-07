@@ -752,7 +752,7 @@ async function createNotification(
     // Try to get user contact info for the webhook
     try {
       const userResult = await client.query(
-        "SELECT email, telefono FROM usuario WHERE usuarioid = $1",
+        "SELECT email FROM usuario WHERE usuarioid = $1",
         [userId]
       );
       const userContact = userResult.rows[0] || {};
