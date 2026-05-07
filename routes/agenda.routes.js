@@ -495,9 +495,15 @@ router.post("/medico/me/disponibilidades", requireAuth, async (req, res) => {
       } catch (_) {}
     }
     console.error("Error POST /agenda/medico/me/disponibilidades:", err);
+    console.error("[DB Detail]:", err?.detail);
+    console.error("[DB Hint]:", err?.hint);
+    console.error("[DB Code]:", err?.code);
     return res.status(500).json({
       success: false,
       message: "No se pudo crear la disponibilidad.",
+      error: err?.message || String(err),
+      detail: err?.detail || null,
+      hint: err?.hint || null,
     });
   } finally {
     if (client) client.release();
