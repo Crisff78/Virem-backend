@@ -2,7 +2,7 @@ const pool = require('./config/db');
 
 async function run() {
   try {
-    console.log('--- Configurando Cita: Esperanza vs Andris para las 9:36 PM ---');
+    console.log('--- Configurando Cita: Esperanza vs Andris para las 9:48 PM ---');
     
     // 1. Find Andris Toribio (Paciente)
     const pRes = await pool.query("SELECT pacienteid FROM paciente WHERE nombres || ' ' || apellidos ILIKE '%Andris Toribio%' LIMIT 1");
@@ -16,10 +16,9 @@ async function run() {
 
     console.log(`Paciente ID: ${pacienteId}, Medico ID: ${medicoId}`);
 
-    // 3. Create a appointment starting at 9:36 PM Local (-04:00)
-    // 9:36 PM = 21:36. In UTC (-04) is 01:36.
-    const start = '2026-05-08 01:36:00+00';
-    const end = '2026-05-08 02:06:00+00';
+    // 3. Create a appointment starting at 9:48 PM Local (-04:00)
+    const start = '2026-05-08 01:48:00+00';
+    const end = '2026-05-08 02:18:00+00';
 
     const insertQ = `
       INSERT INTO cita (
@@ -32,7 +31,7 @@ async function run() {
         (SELECT estadocitaid FROM estado_cita WHERE lower(codigo) = 'pendiente' LIMIT 1),
         (SELECT zonahorariaid FROM zonas_horarias WHERE lower(nombre) = 'utc' LIMIT 1),
         $3, $4, 30, 0, NOW(),
-        'virtual', 'PRUEBA LIVEKIT: 9:36 PM', 'pendiente'
+        'virtual', 'PRUEBA LIVEKIT: 9:48 PM', 'pendiente'
       ) RETURNING citaid, fechahorainicio, fechahorafin
     `;
     
@@ -40,7 +39,7 @@ async function run() {
     
     console.log('CITA PROGRAMADA CON ÉXITO:');
     console.log('ID:', insRes.rows[0].citaid);
-    console.log('Horario:', '9:36 PM (Local)');
+    console.log('Horario:', '9:48 PM (Local)');
 
     process.exit(0);
   } catch (e) {
