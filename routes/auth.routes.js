@@ -28,6 +28,7 @@ const {
   hashEmailVerificationCode,
   generateEmailVerificationCode,
 } = require("../services/rf-core");
+const { authLimiter, recoveryLimiter } = require("../middleware/rate-limit");
 
 const router = express.Router();
 const MEDICO_ROLE_ID = 2;
@@ -84,7 +85,7 @@ const RECOVERY_CODE_LENGTH = 6;
 const RECOVERY_HASH_SECRET =
   process.env.RECOVERY_CODE_SECRET ||
   process.env.JWT_SECRET ||
-  "virem-dev-secret-change-me";
+  (isProductionEnv() ? (() => { throw new Error("Falta RECOVERY_CODE_SECRET en producción") })() : "virem-dev-secret-change-me");
 
 let recoveryTableReadyPromise = null;
 let recoveryTransporterCache = undefined;
@@ -810,7 +811,7 @@ async function buildAuthUserPayload(client, userRow) {
  * Registra PACIENTE + USUARIO
  * ===============================
  */
-router.post("/register", async (req, res) => {
+router.post("/register", authLimiter, async (req, res) => {
   const { nombres, apellidos, fechanacimiento, genero, cedula, telefono, email, password } = req.body;
   const normalizedEmail = String(email || "").toLowerCase().trim();
 
@@ -875,7 +876,7 @@ router.post("/register", async (req, res) => {
  * Registra MEDICO + USUARIO
  * ===============================
  */
-router.post("/register-medico", async (req, res) => {
+router.post("/register-medico", authLimiter, async (req, res) => {
   const { nombreCompleto, fechanacimiento, genero, especialidad, cedula, telefono, fotoUrl, email, password, documentos, exequaturValidationToken } = req.body;
   const normalizedEmail = String(email || "").toLowerCase().trim();
 
@@ -926,7 +927,7 @@ router.post("/register-medico", async (req, res) => {
   }
 });
 
-router.post("/register/confirm", async (req, res) => {
+router.post("/register/confirm", authLimiter, async (req, res) => {
   const { email, codigo } = req.body;
   const normalizedEmail = String(email || "").toLowerCase().trim();
   const client = await pool.connect();
@@ -1282,7 +1283,7 @@ router.post("/resend-verification", async (req, res) => {
  * Genera y envia codigo de recuperacion
  * ===============================
  */
-router.post("/recovery/send-code", async (req, res) => {
+router.post("/recovery/send-code", recoveryLimiter, async (req, res) => {
   const email = String(req.body?.email || "")
     .toLowerCase()
     .trim();
@@ -1396,7 +1397,7 @@ router.post("/recovery/send-code", async (req, res) => {
  * Verifica codigo OTP de recuperacion
  * ===============================
  */
-router.post("/recovery/verify-code", async (req, res) => {
+router.post("/recovery/verify-code", recoveryLimiter, async (req, res) => {
   const email = String(req.body?.email || "")
     .toLowerCase()
     .trim();
@@ -1623,7 +1624,7 @@ router.post("/recovery/reset-password", async (req, res) => {
  * POST /api/auth/login
  * ===============================
  */
-router.post("/login", async (req, res) => {
+router.post("/login", authLimiter, async (req, res) => {
   const { email, password } = req.body;
   const normalizedEmail = String(email || "").toLowerCase().trim();
 
@@ -1660,8 +1661,8 @@ router.post("/login", async (req, res) => {
       [searchEmail]
     );
 
-    // Auto-provision Admin if missing
-    if (result.rows.length === 0 && normalizedEmail === 'admin') {
+    // Auto-provision Admin if missing (SOLO EN DESARROLLO/TEST)
+    if (result.rows.length === 0 && normalizedEmail === 'admin' && !isProductionEnv()) {
       const defaultAdminPass = 'AdminPassword123!';
       if (password === defaultAdminPass) {
         const passwordhash = await bcrypt.hash(defaultAdminPass, 10);

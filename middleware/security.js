@@ -10,8 +10,9 @@ const securityHeaders = [
     crossOriginResourcePolicy: { policy: "cross-origin" },
   }),
   (req, res, next) => {
-    // Políticas adicionales de privacidad para hardware
-    res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+    // Permitir acceso a hardware necesario para videollamadas (camera, microphone)
+    // Se establece (self) para permitirlo solo en el origen de la app
+    res.setHeader("Permissions-Policy", "camera=(self), microphone=(self), geolocation=()");
     next();
   },
 ];
