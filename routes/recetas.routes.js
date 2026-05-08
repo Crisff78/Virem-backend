@@ -6,8 +6,25 @@ const PACIENTE_ROLE_ID = 1;
 
 const router = express.Router();
 
+// Asegurar esquema de recetas
+const ensureRecetasSchema = async () => {
+  try {
+    await pool.query(`
+      ALTER TABLE receta_medica 
+      ADD COLUMN IF NOT EXISTS disponible_paciente BOOLEAN DEFAULT TRUE,
+      ADD COLUMN IF NOT EXISTS signos_vitales_json JSONB DEFAULT '{}'::jsonb,
+      ADD COLUMN IF NOT EXISTS ordenes_laboratorio TEXT,
+      ADD COLUMN IF NOT EXISTS doctor_info_json JSONB DEFAULT '{}'::jsonb
+    `);
+  } catch (err) {
+    console.error("Error asegurando esquema de recetas:", err.message);
+  }
+};
+ensureRecetasSchema();
+
 // MEDICO: Emitir receta
 router.post("/medico/me/recetas", requireAuth, async (req, res) => {
+  console.log('[POST /medico/me/recetas] Body:', req.body);
   try {
     if (req.user.rolid !== MEDICO_ROLE_ID) {
       return res.status(403).json({ success: false, message: "Solo médicos pueden emitir recetas" });
@@ -38,24 +55,41 @@ router.post("/medico/me/recetas", requireAuth, async (req, res) => {
     }
 
     const result = await pool.query(
-      `INSERT INTO receta_medica (pacienteid, citaid, medicoid_text, diagnostico, medicamentos_json, instrucciones, disponible_paciente)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO receta_medica (
+        pacienteid, citaid, medicoid_text, diagnostico, medicamentos_json, 
+        instrucciones, disponible_paciente, signos_vitales_json, 
+        ordenes_laboratorio, doctor_info_json
+      )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        RETURNING recetaid::text, created_at`,
-      [pacienteid, citaid || '00000000-0000-0000-0000-000000000000', medicoid, diagnostico, JSON.stringify(medicamentos), instrucciones, disponible_paciente ?? true]
+      [
+        pacienteid, 
+        citaid || '00000000-0000-0000-0000-000000000000', 
+        medicoid, 
+        diagnostico, 
+        JSON.stringify(medicamentos), 
+        instrucciones, 
+        disponible_paciente ?? true,
+        JSON.stringify(req.body.signos_vitales || {}),
+        req.body.ordenes_laboratorio || '',
+        JSON.stringify(req.body.doctor_info || {})
+      ]
     );
 
-    // Notificar al paciente
+    // Notificar al paciente (en segundo plano para no bloquear respuesta)
     try {
       const { createNotification } = require('../services/platform-core');
-      await createNotification(pool, {
+      createNotification(pool, {
         usuarioid: pacienteid,
         tipo: 'receta_nueva',
         titulo: 'Nueva Receta Disponible',
         contenido: `El Dr. ${req.user.nombrecompleto || 'tu médico'} ha emitido una nueva receta para ti.`,
         data: { recetaid: result.rows[0].recetaid }
+      }).catch(notifErr => {
+        console.warn("Error asíncrono enviando notificación de receta:", notifErr.message);
       });
     } catch (notifErr) {
-      console.warn("Error enviando notificación de receta:", notifErr.message);
+      console.warn("Error al disparar notificación de receta:", notifErr.message);
     }
 
     return res.json({ success: true, receta: result.rows[0] });
