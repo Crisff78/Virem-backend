@@ -37,7 +37,7 @@ const BANNED_CHARS_RE = /[<>{}[\]$%&*=|\\`'"]/g;
 
 // Claves permitidas en signos_vitales_json
 const ALLOWED_SIGNOS_KEYS = new Set([
-  'presionArterial', 'presion_arterial', 'pa',
+  'presionArterial', 'presion_arterial', 'pa', 'presion',
   'temperatura', 't', 'temp',
   'peso',
   'observaciones', 'notas',
@@ -238,12 +238,13 @@ function validateSignosVitales(obj) {
       if (!NUMERIC_ONLY_RE.test(valStr)) {
         return { ok: false, error: `La temperatura solo permite números.` };
       }
-    } else if (key === 'presionArterial' || key === 'presion_arterial' || key === 'pa') {
+    } else if (key === 'presion' || key === 'presionArterial' || key === 'presion_arterial' || key === 'pa') {
       if (!NUMERIC_SLASH_RE.test(valStr)) {
         return { ok: false, error: `La presión solo permite números y un único carácter '/'.` };
       }
-      // Verificar que no sea solo un slash
-      if (valStr.length > 0 && valStr.replace(/[^0-9]/g, '').length === 0) {
+      // Verificar que no sea solo un slash o que no tenga números
+      const onlyNumbers = valStr.replace(/[^0-9]/g, '');
+      if (valStr.length > 0 && onlyNumbers.length === 0) {
         return { ok: false, error: `La presión debe incluir números.` };
       }
     } else {
