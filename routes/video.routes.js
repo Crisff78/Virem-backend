@@ -221,6 +221,23 @@ router.post("/me/citas/:citaId/token", requireAuth, async (req, res) => {
     const roomId = buildRoomId(citaId);
     const displayName = buildDisplayName(context);
 
+    // Notificar al paciente que el médico entró
+    if (context.roleId === MEDICO_ROLE_ID) {
+      emitCitaEvent({
+        eventName: "cita_actualizada",
+        citaId,
+        pacienteId: cita.pacienteid,
+        medicoId: cita.medicoid,
+        extraPayload: {
+          videoSala: {
+            estado: "abierta",
+            canJoin: true,
+            roomName: roomId,
+          },
+        },
+      });
+    }
+
     return res.json({
       success: true,
       serverNow: Date.now(),
