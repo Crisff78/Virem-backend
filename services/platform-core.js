@@ -887,7 +887,7 @@ async function appendSystemMessage(client, { conversacionId, text }) {
   );
 }
 
-async function ensureVideoSala(client, { citaId, provider = "livekit" }) {
+async function ensureVideoSala(client, { citaId, provider = "jitsi" }) {
   const existing = await client.query(
     `SELECT
        videosalaid::text AS videosalaid,
@@ -907,7 +907,7 @@ async function ensureVideoSala(client, { citaId, provider = "livekit" }) {
   if (existing.rows.length) return existing.rows[0];
 
   const videosalaid = randomUUID();
-  // Room name based on citaId for LiveKit
+  // Room name based on citaId
   const roomName = `room_${String(citaId)}`;
   
   // For LiveKit, we don't store a static joinUrl, tokens are generated per-user.

@@ -148,7 +148,7 @@ router.get("/me/citas/:citaId/access", requireAuth, async (req, res) => {
 
 /**
  * POST /api/video/me/citas/:citaId/token
- * Emite token Zego para la cita. Valida ventana temporal y permisos.
+ * Devuelve la configuración de Jitsi para la cita.
  */
 router.post("/me/citas/:citaId/token", requireAuth, async (req, res) => {
   const citaId = normalizeText(req.params?.citaId);
@@ -202,11 +202,10 @@ router.post("/me/citas/:citaId/token", requireAuth, async (req, res) => {
       });
     }
 
-    const provider = process.env.VIDEO_PROVIDER || "livekit";
-    // Asegurar registro en video_salas para auditoria/estado.
+    // El único proveedor ahora es Jitsi
+    const provider = "jitsi";
     const sala = await ensureVideoSala(client, { citaId, provider });
 
-    // Marcar abierta si es el medico el que pide el token (asume que arranca la llamada).
     if (context.roleId === MEDICO_ROLE_ID) {
       await client.query(
         `UPDATE video_salas
@@ -220,89 +219,31 @@ router.post("/me/citas/:citaId/token", requireAuth, async (req, res) => {
     await client.query("COMMIT");
 
     const roomId = buildRoomId(citaId);
-    const userId = buildUserId({ context });
     const displayName = buildDisplayName(context);
 
-    // 1. Intentar LiveKit
-    const lkCfg = getLiveKitConfig();
-    const hasLiveKit = lkCfg.apiKey && process.env.LIVEKIT_API_SECRET;
-
-    if (hasLiveKit && (provider === "livekit" || !getZegoConfig())) {
-      const token = await generateLiveKitToken({
+    return res.json({
+      success: true,
+      serverNow: Date.now(),
+      provider: "jitsi",
+      jitsi: {
+        domain: process.env.JITSI_DOMAIN || "meet.jit.si",
         roomName: roomId,
-        participantIdentity: userId,
-        participantName: displayName,
-        ttl: TOKEN_TTL_S,
-      });
-
-      return res.json({
-        success: true,
-        serverNow: Date.now(),
-        provider: "livekit",
-        livekit: {
-          url: lkCfg.url,
-          token,
-          roomId,
-          userId,
-          userName: displayName,
-        },
-        access: {
-          canJoin: true,
-          startsAt: access.window.startMs,
-          endsAt: access.window.endMs,
-          closesAt: access.window.closeAtMs,
-          durationMin: access.window.durationMin,
-        },
-        sala: sala
-          ? {
-              videoSalaId: normalizeText(sala.videosalaid),
-              estado: normalizeText(sala.estado),
-            }
-          : null,
-      });
-    }
-
-    // 2. Intentar Zego como fallback o si es el preferido
-    const zegoCfg = getZegoConfig();
-    if (zegoCfg) {
-      const token = generateZegoRtcToken({
-        userId,
-        roomId,
-        effectiveTimeSeconds: TOKEN_TTL_S,
-      });
-
-      return res.json({
-        success: true,
-        serverNow: Date.now(),
-        provider: "zego",
-        zego: {
-          appId: zegoCfg.appId,
-          server: zegoCfg.server,
-          token,
-          roomId,
-          userId,
-          userName: displayName,
-          ttlSeconds: TOKEN_TTL_S,
-        },
-        access: {
-          canJoin: true,
-          startsAt: access.window.startMs,
-          endsAt: access.window.endMs,
-          closesAt: access.window.closeAtMs,
-          durationMin: access.window.durationMin,
-        },
-        sala: sala
-          ? {
-              videoSalaId: normalizeText(sala.videosalaid),
-              estado: normalizeText(sala.estado),
-            }
-          : null,
-      });
-    }
-
-    return res.status(500).json({
-      success: false,
-      message: "No hay ningun proveedor de video configurado o disponible.",
+        displayName,
+        userId: buildUserId({ context }),
+      },
+      access: {
+        canJoin: true,
+        startsAt: access.window.startMs,
+        endsAt: access.window.endMs,
+        closesAt: access.window.closeAtMs,
+        durationMin: access.window.durationMin,
+      },
+      sala: sala
+        ? {
+            videoSalaId: normalizeText(sala.videosalaid),
+            estado: normalizeText(sala.estado),
+          }
+        : null,
     });
 
   } catch (err) {
