@@ -764,12 +764,13 @@ async function createNotification(
       );
       const userContact = userResult.rows[0] || {};
       
-      if (userContact.email) {
+      const targetEmail = String(userContact.email || "").trim();
+      if (targetEmail) {
         axios.post(process.env.MAKE_WEBHOOK_URL, {
           event: "notification",
           userId,
-          email: userContact.email,
-          to: userContact.email, // Alias for easier mapping
+          email: targetEmail,
+          to: targetEmail, // Alias for easier mapping
           telefono: userContact.telefono,
           ...payload
         }).catch(e => console.warn("[Webhook] Global webhook failed:", e.message));
