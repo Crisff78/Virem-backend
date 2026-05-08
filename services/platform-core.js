@@ -125,6 +125,13 @@ async function ensurePlatformSchema() {
   if (ensurePlatformSchemaPromise) return ensurePlatformSchemaPromise;
 
   ensurePlatformSchemaPromise = (async () => {
+    // Helper function for accent-insensitive search
+    await pool.query(
+      `CREATE OR REPLACE FUNCTION f_unaccent(text) RETURNS text AS $$
+       SELECT translate($1, 'áéíóúÁÉÍÓÚäëïöüÄËÏÖÜñÑ', 'aeiouAEIOUaeiouAEIOUnN');
+       $$ LANGUAGE sql IMMUTABLE;`
+    );
+
     await pool.query(
       `ALTER TABLE paciente
        ADD COLUMN IF NOT EXISTS usuarioid INTEGER`
@@ -606,8 +613,8 @@ async function resolveEspecialidad(client, { especialidadId, especialidad, medic
     const result = await client.query(
       `SELECT especialidadid, nombre, permite_presencial, permite_virtual
        FROM especialidad
-       WHERE lower(nombre) = lower($1)
-          OR lower(nombre) LIKE lower($2)
+       WHERE lower(f_unaccent(nombre)) = lower(f_unaccent($1))
+          OR lower(f_unaccent(nombre)) LIKE lower(f_unaccent($2))
        ORDER BY especialidadid ASC
        LIMIT 1`,
       [byName, `%${byName}%`]
@@ -757,13 +764,23 @@ async function createNotification(
       );
       const userContact = userResult.rows[0] || {};
       
-      axios.post(process.env.MAKE_WEBHOOK_URL, {
-        event: "notification",
-        userId,
-        email: userContact.email,
-        telefono: userContact.telefono,
-        ...payload
-      }).catch(e => console.warn("[Webhook] Global webhook failed:", e.message));
+      const targetEmail = String(userContact.email || "").trim();
+      if (targetEmail) {
+        axios.post(process.env.MAKE_WEBHOOK_URL, {
+          event: "notification",
+          userId,
+          email: targetEmail,
+          to: targetEmail, // Alias for easier mapping
+          pacienteEmail: targetEmail, // Added for compatibility with Make.com invoice scenarios
+          telefono: userContact.telefono,
+          ...payload
+        }).catch(e => {
+          const errorMsg = e.response?.data ? JSON.stringify(e.response.data) : e.message;
+          console.warn(`[Webhook] Global webhook failed for user ${userId}:`, errorMsg);
+        });
+      } else {
+        console.warn(`[Webhook] Skipping notification webhook for user ${userId}: email is missing.`);
+      }
     } catch (err) {
       console.warn("[Webhook] Failed to fetch user contact for webhook:", err.message);
     }
@@ -880,7 +897,7 @@ async function appendSystemMessage(client, { conversacionId, text }) {
   );
 }
 
-async function ensureVideoSala(client, { citaId, provider = "livekit" }) {
+async function ensureVideoSala(client, { citaId, provider = "jitsi" }) {
   const existing = await client.query(
     `SELECT
        videosalaid::text AS videosalaid,
@@ -900,7 +917,7 @@ async function ensureVideoSala(client, { citaId, provider = "livekit" }) {
   if (existing.rows.length) return existing.rows[0];
 
   const videosalaid = randomUUID();
-  // Room name based on citaId for LiveKit
+  // Room name based on citaId
   const roomName = `room_${String(citaId)}`;
   
   // For LiveKit, we don't store a static joinUrl, tokens are generated per-user.
@@ -1067,8 +1084,11 @@ function parseBlockDates({ fecha, horaInicio, horaFin, fechaInicio, fechaFin }) 
     return { start: null, end: null };
   }
 
-  const start = new Date(`${cleanDate}T${cleanStart}:00`);
-  const end = new Date(`${cleanDate}T${cleanEnd}:00`);
+  // NOTE: For es-DO project, we assume America/Santo_Domingo (UTC-4)
+  // This ensures that when a doctor types 08:00, it's stored and retrieved as 08:00 local.
+  const start = new Date(`${cleanDate}T${cleanStart}:00-04:00`);
+  const end = new Date(`${cleanDate}T${cleanEnd}:00-04:00`);
+  
   if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return { start: null, end: null };
   return { start, end };
 }
@@ -1119,7 +1139,10 @@ function buildSlots(availabilityRows, bookedRows, { modalidadFilter, fechaFilter
       const next = new Date(pointer.getTime() + slotMin * 60 * 1000);
 
       if (pointer.getTime() > nowMs) {
-        const candidateDate = pointer.toISOString().slice(0, 10);
+        // Calculate candidate date in -04:00 offset (Santo Domingo)
+        const localPointer = new Date(pointer.getTime() - 4 * 60 * 60 * 1000);
+        const candidateDate = localPointer.toISOString().slice(0, 10);
+        
         if (!hasFechaFilter || candidateDate === fechaFilter) {
           const overlapsMedico = bookedForMedico.some((b) =>
             slotOverlaps(pointer, next, b.start, b.end)

@@ -24,6 +24,7 @@ const {
   fetchCitaByIdForContext,
   ensureVideoSala,
 } = require("../services/platform-core");
+const { generateLiveKitToken, getLiveKitConfig } = require("../services/livekit.service");
 const { generateZegoRtcToken, getZegoConfig } = require("../services/zego.service");
 const { emitToUser, emitCitaEvent } = require("../realtime/socket");
 
@@ -147,21 +148,12 @@ router.get("/me/citas/:citaId/access", requireAuth, async (req, res) => {
 
 /**
  * POST /api/video/me/citas/:citaId/token
- * Emite token Zego para la cita. Valida ventana temporal y permisos.
+ * Devuelve la configuración de Jitsi para la cita.
  */
 router.post("/me/citas/:citaId/token", requireAuth, async (req, res) => {
   const citaId = normalizeText(req.params?.citaId);
   if (!citaId) {
     return res.status(400).json({ success: false, message: "citaId es obligatorio." });
-  }
-
-  const cfg = getZegoConfig();
-  if (!cfg) {
-    return res.status(500).json({
-      success: false,
-      message:
-        "Zego no esta configurado en el servidor. Define ZEGO_APP_ID y ZEGO_SERVER_SECRET.",
-    });
   }
 
   let client;
@@ -210,10 +202,10 @@ router.post("/me/citas/:citaId/token", requireAuth, async (req, res) => {
       });
     }
 
-    // Asegurar registro en video_salas para auditoria/estado.
-    const sala = await ensureVideoSala(client, { citaId, provider: "zego" });
+    // El único proveedor ahora es Jitsi
+    const provider = "jitsi";
+    const sala = await ensureVideoSala(client, { citaId, provider });
 
-    // Marcar abierta si es el medico el que pide el token (asume que arranca la llamada).
     if (context.roleId === MEDICO_ROLE_ID) {
       await client.query(
         `UPDATE video_salas
@@ -227,26 +219,34 @@ router.post("/me/citas/:citaId/token", requireAuth, async (req, res) => {
     await client.query("COMMIT");
 
     const roomId = buildRoomId(citaId);
-    const userId = buildUserId({ context });
     const displayName = buildDisplayName(context);
-    const token = generateZegoRtcToken({
-      userId,
-      roomId,
-      effectiveTimeSeconds: TOKEN_TTL_S,
-    });
+
+    // Notificar al paciente que el médico entró
+    if (context.roleId === MEDICO_ROLE_ID) {
+      emitCitaEvent({
+        eventName: "cita_actualizada",
+        citaId,
+        pacienteId: cita.pacienteid,
+        medicoId: cita.medicoid,
+        extraPayload: {
+          videoSala: {
+            estado: "abierta",
+            canJoin: true,
+            roomName: roomId,
+          },
+        },
+      });
+    }
 
     return res.json({
       success: true,
       serverNow: Date.now(),
-      provider: "zego",
-      zego: {
-        appId: cfg.appId,
-        server: cfg.server,
-        token,
-        roomId,
-        userId,
-        userName: displayName,
-        ttlSeconds: TOKEN_TTL_S,
+      provider: "jitsi",
+      jitsi: {
+        domain: process.env.JITSI_DOMAIN || "meet.jit.si",
+        roomName: roomId,
+        displayName,
+        userId: buildUserId({ context }),
       },
       access: {
         canJoin: true,
@@ -262,6 +262,7 @@ router.post("/me/citas/:citaId/token", requireAuth, async (req, res) => {
           }
         : null,
     });
+
   } catch (err) {
     if (client) {
       try { await client.query("ROLLBACK"); } catch (_) {}
