@@ -10,9 +10,9 @@ const { normalizeText, parsePositiveInt } = require('./platform-core');
 // Whitelist estricta por campo (con soporte para acentos y enie)
 const ALPHA_NUM_RE = /^[\p{L}\p{N}\s]*$/u;
 const NUMERIC_ONLY_RE = /^[0-9]*$/;
-const NUMERIC_SLASH_RE = /^[0-9/]*$/;
+const NUMERIC_SLASH_RE = /^[0-9]*\/?[0-9]*$/; // At most one slash
 const LETTERS_ONLY_RE = /^[\p{L}\s]*$/u;
-const ALPHA_NUM_SLASH_RE = /^[\p{L}\p{N}\s/]*$/u;
+const ALPHA_NUM_SLASH_RE = /^[\p{L}\p{N}\s]*\/?[\p{L}\p{N}\s]*$/u; // At most one slash
 
 const MEDICAL_TEXT_RE = /^[\p{L}\p{N}\s.,\-/:;()]*$/u;
 const MEDICAL_TEXT_NO_NEWLINE_RE = /^[\p{L}\p{N} .,\-/:;()]*$/u;
@@ -26,8 +26,8 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // Unidades de dosis aceptadas (whitelist explicita).
 const DOSIS_RE = /^[\p{L}\p{N}\s]*$/u;
 
-// Frecuencia: solo numeros, letras y /
-const FRECUENCIA_RE = /^[\p{L}\p{N}\s/]*$/u;
+// Frecuencia: solo numeros, letras y / (maximo uno)
+const FRECUENCIA_RE = /^[\p{L}\p{N}\s]*\/?[\p{L}\p{N}\s]*$/u;
 
 // Duracion: solo numeros y letras
 const DURACION_RE = /^[\p{L}\p{N}\s]*$/u;
@@ -138,11 +138,19 @@ function validateMedicamento(item, idx) {
 
   // frecuencia: opcional. Si viene, valida charset y largo.
   const frecCleaned = normalizeText(item.frecuencia);
-  if (frecCleaned && !FRECUENCIA_RE.test(frecCleaned)) {
-    return {
-      ok: false,
-      error: `${label}: frecuencia solo debe contener letras, números y el carácter '/'.`,
-    };
+  if (frecCleaned) {
+    if (!FRECUENCIA_RE.test(frecCleaned)) {
+      return {
+        ok: false,
+        error: `${label}: frecuencia solo debe contener letras, números y un único carácter '/'.`,
+      };
+    }
+    if (frecCleaned.includes('/') && frecCleaned.replace(/[^a-zA-Z0-9\p{L}]/gu, '').length === 0) {
+      return {
+        ok: false,
+        error: `${label}: frecuencia debe incluir letras o números.`,
+      };
+    }
   }
 
   // duracion: opcional. Si viene, valida formato.
@@ -232,7 +240,11 @@ function validateSignosVitales(obj) {
       }
     } else if (key === 'presionArterial' || key === 'presion_arterial' || key === 'pa') {
       if (!NUMERIC_SLASH_RE.test(valStr)) {
-        return { ok: false, error: `La presión solo permite números y el carácter '/'.` };
+        return { ok: false, error: `La presión solo permite números y un único carácter '/'.` };
+      }
+      // Verificar que no sea solo un slash
+      if (valStr.length > 0 && valStr.replace(/[^0-9]/g, '').length === 0) {
+        return { ok: false, error: `La presión debe incluir números.` };
       }
     } else {
       // Otros campos (observaciones, etc) usan texto medico normal
