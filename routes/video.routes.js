@@ -233,11 +233,11 @@ router.post("/me/citas/:citaId/token", requireAuth, async (req, res) => {
 
     // Prioridad: LiveKit
     const lkCfg = getLiveKitConfig();
-    console.log('[DEBUG] Config LiveKit detectada:', { 
-      url: lkCfg.url, 
-      hasKey: !!lkCfg.apiKey, 
-      hasSecret: !!process.env.LIVEKIT_API_SECRET 
-    });
+    console.log('--- DIAGNÓSTICO DE VARIABLES ---');
+    console.log('Teclas encontradas en process.env:', Object.keys(process.env).filter(k => k.includes('LIVEKIT')));
+    console.log('lkCfg:', { hasUrl: !!lkCfg.url, hasKey: !!lkCfg.apiKey });
+    console.log('Secret en env:', !!process.env.LIVEKIT_API_SECRET);
+    console.log('-------------------------------');
 
     if (lkCfg.apiKey && process.env.LIVEKIT_API_SECRET) {
       const token = await generateLiveKitToken({
