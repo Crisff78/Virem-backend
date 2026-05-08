@@ -27,6 +27,10 @@ async function generateLiveKitToken({
     identity: participantIdentity,
     name: participantName,
     ttl: ttl,
+    metadata: JSON.stringify({
+      displayName: participantName,
+      joinedAt: new Date().toISOString(),
+    }),
   });
 
   at.addGrant({

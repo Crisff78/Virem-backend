@@ -156,15 +156,6 @@ router.post("/me/citas/:citaId/token", requireAuth, async (req, res) => {
     return res.status(400).json({ success: false, message: "citaId es obligatorio." });
   }
 
-  const cfg = getZegoConfig();
-  if (!cfg) {
-    return res.status(500).json({
-      success: false,
-      message:
-        "Zego no esta configurado en el servidor. Define ZEGO_APP_ID y ZEGO_SERVER_SECRET.",
-    });
-  }
-
   let client;
   try {
     client = await pool.connect();
@@ -211,8 +202,9 @@ router.post("/me/citas/:citaId/token", requireAuth, async (req, res) => {
       });
     }
 
+    const provider = process.env.VIDEO_PROVIDER || "livekit";
     // Asegurar registro en video_salas para auditoria/estado.
-    const sala = await ensureVideoSala(client, { citaId, provider: "livekit" });
+    const sala = await ensureVideoSala(client, { citaId, provider });
 
     // Marcar abierta si es el medico el que pide el token (asume que arranca la llamada).
     if (context.roleId === MEDICO_ROLE_ID) {
@@ -231,15 +223,11 @@ router.post("/me/citas/:citaId/token", requireAuth, async (req, res) => {
     const userId = buildUserId({ context });
     const displayName = buildDisplayName(context);
 
-    // Prioridad: LiveKit
+    // 1. Intentar LiveKit
     const lkCfg = getLiveKitConfig();
-    console.log('--- DIAGNÓSTICO DE VARIABLES ---');
-    console.log('Teclas encontradas en process.env:', Object.keys(process.env).filter(k => k.includes('LIVEKIT')));
-    console.log('lkCfg:', { hasUrl: !!lkCfg.url, hasKey: !!lkCfg.apiKey });
-    console.log('Secret en env:', !!process.env.LIVEKIT_API_SECRET);
-    console.log('-------------------------------');
+    const hasLiveKit = lkCfg.apiKey && process.env.LIVEKIT_API_SECRET;
 
-    if (lkCfg.apiKey && process.env.LIVEKIT_API_SECRET) {
+    if (hasLiveKit && (provider === "livekit" || !getZegoConfig())) {
       const token = await generateLiveKitToken({
         roomName: roomId,
         participantIdentity: userId,
@@ -274,7 +262,7 @@ router.post("/me/citas/:citaId/token", requireAuth, async (req, res) => {
       });
     }
 
-    // Fallback: Zego
+    // 2. Intentar Zego como fallback o si es el preferido
     const zegoCfg = getZegoConfig();
     if (zegoCfg) {
       const token = generateZegoRtcToken({
@@ -314,8 +302,9 @@ router.post("/me/citas/:citaId/token", requireAuth, async (req, res) => {
 
     return res.status(500).json({
       success: false,
-      message: "No hay ningun proveedor de video configurado (LiveKit/Zego).",
+      message: "No hay ningun proveedor de video configurado o disponible.",
     });
+
   } catch (err) {
     if (client) {
       try { await client.query("ROLLBACK"); } catch (_) {}
