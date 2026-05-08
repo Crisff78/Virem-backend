@@ -10,7 +10,7 @@ const { AccessToken } = require("livekit-server-sdk");
  * @param {number} [args.ttl=3600] Token TTL in seconds
  * @returns {string} The generated JWT token
  */
-function generateLiveKitToken({
+async function generateLiveKitToken({
   roomName,
   participantName,
   participantIdentity,
@@ -37,7 +37,7 @@ function generateLiveKitToken({
     canPublishData: true,
   });
 
-  return at.toJwt();
+  return await at.toJwt();
 }
 
 function getLiveKitConfig() {

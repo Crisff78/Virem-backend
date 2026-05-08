@@ -234,7 +234,7 @@ router.post("/me/citas/:citaId/token", requireAuth, async (req, res) => {
     // Prioridad: LiveKit
     const lkCfg = getLiveKitConfig();
     if (lkCfg.apiKey && process.env.LIVEKIT_API_SECRET) {
-      const token = generateLiveKitToken({
+      const token = await generateLiveKitToken({
         roomName: roomId,
         participantIdentity: userId,
         participantName: displayName,
