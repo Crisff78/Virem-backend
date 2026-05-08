@@ -771,9 +771,13 @@ async function createNotification(
           userId,
           email: targetEmail,
           to: targetEmail, // Alias for easier mapping
+          pacienteEmail: targetEmail, // Added for compatibility with Make.com invoice scenarios
           telefono: userContact.telefono,
           ...payload
-        }).catch(e => console.warn("[Webhook] Global webhook failed:", e.message));
+        }).catch(e => {
+          const errorMsg = e.response?.data ? JSON.stringify(e.response.data) : e.message;
+          console.warn(`[Webhook] Global webhook failed for user ${userId}:`, errorMsg);
+        });
       } else {
         console.warn(`[Webhook] Skipping notification webhook for user ${userId}: email is missing.`);
       }

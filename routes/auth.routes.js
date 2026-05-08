@@ -238,6 +238,7 @@ async function sendRecoveryCodeEmail({ email, code }) {
           type: 'recovery_code',
           email: email,
           to: email, // Alias for easier mapping
+          pacienteEmail: email, // Added for compatibility with Make.com scenarios
           code: code,
           timestamp: new Date().toISOString()
         });
@@ -301,6 +302,7 @@ async function sendEmailVerificationCodeEmail({ email, code }) {
           type: 'verification_code',
           email: email,
           to: email, // Alias for easier mapping
+          pacienteEmail: email, // Added for compatibility with Make.com scenarios
           code: code,
           verificationLink: verificationLink,
           timestamp: new Date().toISOString()
