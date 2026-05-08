@@ -179,6 +179,11 @@ router.get("/disponibilidades", requireAuth, async (req, res) => {
       especialidad,
       medicoId,
     });
+    
+    if (especialidad && !especialidadRow) {
+      console.log(`[GET disponibilidades] Specialty not found: "${especialidad}"`);
+    }
+
     const modalidadValidation = validateModalidadForEspecialidad(
       especialidadRow,
       modalidad || "presencial"
@@ -201,8 +206,9 @@ router.get("/disponibilidades", requireAuth, async (req, res) => {
     }
 
     if (fecha && isValidIsoDate(fecha)) {
-      params.push(`${fecha}T00:00:00.000Z`);
-      params.push(`${fecha}T23:59:59.999Z`);
+      // NOTE: Using -04:00 to match the doctor's local time (Santo Domingo)
+      params.push(`${fecha}T00:00:00.000-04:00`);
+      params.push(`${fecha}T23:59:59.999-04:00`);
       where.push(`h.fechainicio <= $${params.length}::timestamptz`);
       where.push(`h.fechafin >= $${params.length - 1}::timestamptz`);
     }

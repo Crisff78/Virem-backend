@@ -125,6 +125,13 @@ async function ensurePlatformSchema() {
   if (ensurePlatformSchemaPromise) return ensurePlatformSchemaPromise;
 
   ensurePlatformSchemaPromise = (async () => {
+    // Helper function for accent-insensitive search
+    await pool.query(
+      `CREATE OR REPLACE FUNCTION f_unaccent(text) RETURNS text AS $$
+       SELECT translate($1, 'áéíóúÁÉÍÓÚäëïöüÄËÏÖÜñÑ', 'aeiouAEIOUaeiouAEIOUnN');
+       $$ LANGUAGE sql IMMUTABLE;`
+    );
+
     await pool.query(
       `ALTER TABLE paciente
        ADD COLUMN IF NOT EXISTS usuarioid INTEGER`
@@ -606,8 +613,8 @@ async function resolveEspecialidad(client, { especialidadId, especialidad, medic
     const result = await client.query(
       `SELECT especialidadid, nombre, permite_presencial, permite_virtual
        FROM especialidad
-       WHERE lower(nombre) = lower($1)
-          OR lower(nombre) LIKE lower($2)
+       WHERE lower(f_unaccent(nombre)) = lower(f_unaccent($1))
+          OR lower(f_unaccent(nombre)) LIKE lower(f_unaccent($2))
        ORDER BY especialidadid ASC
        LIMIT 1`,
       [byName, `%${byName}%`]
@@ -1067,8 +1074,11 @@ function parseBlockDates({ fecha, horaInicio, horaFin, fechaInicio, fechaFin }) 
     return { start: null, end: null };
   }
 
-  const start = new Date(`${cleanDate}T${cleanStart}:00`);
-  const end = new Date(`${cleanDate}T${cleanEnd}:00`);
+  // NOTE: For es-DO project, we assume America/Santo_Domingo (UTC-4)
+  // This ensures that when a doctor types 08:00, it's stored and retrieved as 08:00 local.
+  const start = new Date(`${cleanDate}T${cleanStart}:00-04:00`);
+  const end = new Date(`${cleanDate}T${cleanEnd}:00-04:00`);
+  
   if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return { start: null, end: null };
   return { start, end };
 }
@@ -1119,7 +1129,10 @@ function buildSlots(availabilityRows, bookedRows, { modalidadFilter, fechaFilter
       const next = new Date(pointer.getTime() + slotMin * 60 * 1000);
 
       if (pointer.getTime() > nowMs) {
-        const candidateDate = pointer.toISOString().slice(0, 10);
+        // Calculate candidate date in -04:00 offset (Santo Domingo)
+        const localPointer = new Date(pointer.getTime() - 4 * 60 * 60 * 1000);
+        const candidateDate = localPointer.toISOString().slice(0, 10);
+        
         if (!hasFechaFilter || candidateDate === fechaFilter) {
           const overlapsMedico = bookedForMedico.some((b) =>
             slotOverlaps(pointer, next, b.start, b.end)
