@@ -22,19 +22,21 @@ const ensureRecetasSchema = async () => {
 };
 ensureRecetasSchema();
 
-const { 
-  resolveUserContext, 
-  normalizeText, 
-  parsePositiveInt, 
-  createNotification 
+const {
+  resolveUserContext,
+  createNotification
 } = require("../services/platform-core");
+const { validateRecetaBody, validateUuid } = require("../services/recetas-validator");
+
+const ZERO_UUID = '00000000-0000-0000-0000-000000000000';
 
 // MEDICO: Emitir receta
-router.post("/medico/me/recetas", requireAuth, async (req, res) => {
+// El middleware validateRecetaBody sanitiza/valida todo el payload antes de tocar la DB.
+router.post("/medico/me/recetas", requireAuth, validateRecetaBody, async (req, res) => {
   let client;
   try {
     client = await pool.connect();
-    
+
     // 1. Resolver contexto seguro del usuario (previene inyeccion de identidad)
     const context = await resolveUserContext(client, req.user);
     if (context.error) {
@@ -47,38 +49,28 @@ router.post("/medico/me/recetas", requireAuth, async (req, res) => {
 
     const medicoid = context.medico.medicoid;
 
-    // 2. Extracción y Limpieza de datos (Sanitización básica para prevenir XSS/Payload abuse)
-    let { 
-      pacienteid, 
-      paciente_search, 
-      citaid, 
-      diagnostico, 
-      medicamentos, 
-      instrucciones, 
-      disponible_paciente,
-      signos_vitales,
+    // 2. Datos ya sanitizados/validados por el middleware
+    const {
+      pacienteid,
+      paciente_search,
+      citaid,
+      diagnostico,
+      medicamentos,
+      instrucciones,
       ordenes_laboratorio,
-      doctor_info
-    } = req.body;
-    
-    diagnostico = normalizeText(diagnostico).slice(0, 5000);
-    instrucciones = normalizeText(instrucciones).slice(0, 5000);
-    ordenes_laboratorio = normalizeText(ordenes_laboratorio).slice(0, 5000);
-    paciente_search = normalizeText(paciente_search).slice(0, 100);
+      signos_vitales,
+      doctor_info,
+      disponible_paciente,
+    } = req.validatedReceta;
 
-    // Validaciones de tipo estrictas
-    if (!Array.isArray(medicamentos)) {
-      return res.status(400).json({ success: false, message: "El listado de medicamentos debe ser un arreglo" });
-    }
-
-    // 3. Resolución de Paciente con protección contra SQLi
-    let targetPacienteId = parsePositiveInt(pacienteid);
+    // 3. Resolución de Paciente (queries parametrizadas, input ya validado)
+    let targetPacienteId = pacienteid;
 
     if (!targetPacienteId && paciente_search) {
       // Uso de f_unaccent para búsqueda segura e insensible a acentos
       const pResult = await client.query(
-        `SELECT usuarioid FROM paciente 
-         WHERE (lower(f_unaccent(nombres || ' ' || apellidos)) LIKE lower(f_unaccent($1)) 
+        `SELECT usuarioid FROM paciente
+         WHERE (lower(f_unaccent(nombres || ' ' || apellidos)) LIKE lower(f_unaccent($1))
             OR btrim(cedula) = $2)
          LIMIT 1`,
         [`%${paciente_search}%`, paciente_search]
@@ -95,44 +87,42 @@ router.post("/medico/me/recetas", requireAuth, async (req, res) => {
 
     // 4. Verificación de Autorización (¿Tiene el médico permiso para recetar a este paciente?)
     // Si se provee una citaid, verificamos que el médico y paciente coincidan
-    let cleanCitaId = '00000000-0000-0000-0000-000000000000';
-    if (citaid && citaid !== cleanCitaId) {
+    let cleanCitaId = ZERO_UUID;
+    if (citaid) {
       const citaCheck = await client.query(
-        `SELECT citaid FROM cita 
-         WHERE citaid::text = $1 
-           AND medicoid::text = $2 
+        `SELECT citaid FROM cita
+         WHERE citaid::text = $1
+           AND medicoid::text = $2
            AND pacienteid = (SELECT pacienteid FROM paciente WHERE usuarioid = $3)
          LIMIT 1`,
         [citaid, String(medicoid), targetPacienteId]
       );
       if (citaCheck.rows.length === 0) {
-        // Si no hay cita directa, al menos validamos que el médico haya tenido alguna interacción previa o sea un médico registrado
-        // Por ahora, si se provee citaid y no coincide, bloqueamos por seguridad
         return res.status(403).json({ success: false, message: "No tiene autorización para emitir recetas para esta cita específica" });
       }
       cleanCitaId = citaid;
     }
 
-    // 5. Inserción Segura (Transaccional)
+    // 5. Inserción Segura (queries parametrizadas + JSON serializado por nosotros)
     const result = await client.query(
       `INSERT INTO receta_medica (
-        pacienteid, citaid, medicoid_text, diagnostico, medicamentos_json, 
-        instrucciones, disponible_paciente, signos_vitales_json, 
+        pacienteid, citaid, medicoid_text, diagnostico, medicamentos_json,
+        instrucciones, disponible_paciente, signos_vitales_json,
         ordenes_laboratorio, doctor_info_json
       )
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        RETURNING recetaid::text, created_at`,
       [
-        targetPacienteId, 
-        cleanCitaId, 
-        String(medicoid), 
-        diagnostico || 'Sin diagnóstico especificado', 
-        JSON.stringify(medicamentos), 
-        instrucciones, 
-        disponible_paciente ?? true,
+        targetPacienteId,
+        cleanCitaId,
+        String(medicoid),
+        diagnostico || 'Sin diagnóstico especificado',
+        JSON.stringify(medicamentos),
+        instrucciones,
+        disponible_paciente,
         JSON.stringify(signos_vitales || {}),
         ordenes_laboratorio,
-        JSON.stringify(doctor_info || {})
+        JSON.stringify(doctor_info),
       ]
     );
 
@@ -222,9 +212,11 @@ router.get("/paciente/me/recetas", requireAuth, async (req, res) => {
 router.get("/recetas/:id", requireAuth, async (req, res) => {
   let client;
   try {
-    const { id } = req.params;
-    const cleanId = normalizeText(id);
-    if (!cleanId) return res.status(400).json({ success: false, message: "ID de receta inválido" });
+    const idCheck = validateUuid(req.params.id, 'recetaid');
+    if (!idCheck.ok) {
+      return res.status(400).json({ success: false, message: "ID de receta inválido" });
+    }
+    const cleanId = idCheck.value;
 
     client = await pool.connect();
     
