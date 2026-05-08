@@ -7,6 +7,13 @@ const { normalizeText, parsePositiveInt } = require('./platform-core');
 //  - digitos
 //  - espacios y saltos de linea
 //  - signos basicos: . , - / : ; ( )
+// Whitelist estricta por campo (con soporte para acentos y enie)
+const ALPHA_NUM_RE = /^[\p{L}\p{N}\s]*$/u;
+const NUMERIC_ONLY_RE = /^[0-9]*$/;
+const NUMERIC_SLASH_RE = /^[0-9/]*$/;
+const LETTERS_ONLY_RE = /^[\p{L}\s]*$/u;
+const ALPHA_NUM_SLASH_RE = /^[\p{L}\p{N}\s/]*$/u;
+
 const MEDICAL_TEXT_RE = /^[\p{L}\p{N}\s.,\-/:;()]*$/u;
 const MEDICAL_TEXT_NO_NEWLINE_RE = /^[\p{L}\p{N} .,\-/:;()]*$/u;
 
@@ -16,32 +23,23 @@ const IDENTIFIER_RE = /^[\p{L}\p{N}\s.\-]*$/u;
 // UUID v4-ish (acepta cualquier UUID con formato canonico)
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-// Valores de signos vitales: digitos, letras, espacios, punto, slash, grado, guion
-const SIGNOS_VALUE_RE = /^[\p{L}\p{N}\s.\-/°]*$/u;
-
 // Unidades de dosis aceptadas (whitelist explicita).
-// Permite punto final opcional para abreviaturas (ej: "1 caps.").
-const DOSIS_RE = /^\d+([.,]\d+)?\s*(mg|mcg|ug|µg|g|kg|ml|cc|l|caps?|capsulas?|cápsulas?|comp|comprimidos?|tab|tabletas?|gotas?|gts|ui|cda|cdas|cdita|cditas|cucharadas?|cucharaditas?|aplicaciones?|unidades?|sobres?|amp|ampollas?|inhalaciones?|puffs?)\.?$/i;
+const DOSIS_RE = /^[\p{L}\p{N}\s]*$/u;
 
-// Frecuencia: whitelist medico simple. No exige formato estricto porque varia mucho
-// (c/8h, BID, TID, "cada 12 horas", "1 vez al dia"), pero limita charset y tamanio.
-const FRECUENCIA_RE = /^[\p{L}\p{N} .,\-/:;()]{1,100}$/u;
+// Frecuencia: solo numeros, letras y /
+const FRECUENCIA_RE = /^[\p{L}\p{N}\s/]*$/u;
 
-// Duracion: numero + unidad temporal, con punto final opcional.
-const DURACION_RE = /^\d{1,3}\s*(d|dia|días|dias|h|hora|horas|sem|semana|semanas|m|mes|meses|indefinido|permanente)\.?$/i;
+// Duracion: solo numeros y letras
+const DURACION_RE = /^[\p{L}\p{N}\s]*$/u;
 
-// Caracteres explicitamente prohibidos (para mensaje de error claro)
+// Caracteres explicitamente prohibidos
 const BANNED_CHARS_RE = /[<>{}[\]$%&*=|\\`'"]/g;
 
-// Claves permitidas en signos_vitales_json (formato camelCase, snake_case y abreviado)
+// Claves permitidas en signos_vitales_json
 const ALLOWED_SIGNOS_KEYS = new Set([
   'presionArterial', 'presion_arterial', 'pa',
-  'frecuenciaCardiaca', 'frecuencia_cardiaca', 'fc',
-  'frecuenciaRespiratoria', 'frecuencia_respiratoria', 'fr',
   'temperatura', 't', 'temp',
-  'saturacion', 'saturacionO2', 'spo2', 'sat',
-  'peso', 'talla', 'imc',
-  'glicemia', 'glucosa',
+  'peso',
   'observaciones', 'notas',
 ]);
 
@@ -116,13 +114,13 @@ function validateMedicamento(item, idx) {
     return { ok: false, error: `${label} debe ser un objeto.` };
   }
 
-  const nombreRes = validateMedicalText(item.nombre, {
-    maxLen: 200,
-    fieldName: `${label} (nombre)`,
-    allowNewlines: false,
-    optional: false,
-  });
-  if (!nombreRes.ok) return nombreRes;
+  const nombreCleaned = normalizeText(item.nombre);
+  if (!nombreCleaned) {
+    return { ok: false, error: `${label} (nombre) es obligatorio.` };
+  }
+  if (!LETTERS_ONLY_RE.test(nombreCleaned)) {
+    return { ok: false, error: `${label} (nombre) solo debe contener letras.` };
+  }
 
   const dosisCleaned = normalizeText(item.dosis);
   if (!dosisCleaned) {
@@ -131,39 +129,35 @@ function validateMedicamento(item, idx) {
   if (dosisCleaned.length > 50) {
     return { ok: false, error: `${label}: dosis excede el largo maximo.` };
   }
-  if (!DOSIS_RE.test(dosisCleaned)) {
+  if (!ALPHA_NUM_RE.test(dosisCleaned)) {
     return {
       ok: false,
-      error: `${label}: dosis con formato invalido (ej: 500 mg, 10 ml, 1 caps).`,
+      error: `${label}: dosis solo debe contener letras y números.`,
     };
   }
 
   // frecuencia: opcional. Si viene, valida charset y largo.
   const frecCleaned = normalizeText(item.frecuencia);
   if (frecCleaned && !FRECUENCIA_RE.test(frecCleaned)) {
-    const banned = listBannedChars(frecCleaned);
-    const detalle = banned.length
-      ? ` Caracteres no permitidos: ${banned.join(' ')}`
-      : '';
     return {
       ok: false,
-      error: `${label}: frecuencia con formato invalido (ej: c/8h, cada 12 horas).${detalle}`,
+      error: `${label}: frecuencia solo debe contener letras, números y el carácter '/'.`,
     };
   }
 
-  // duracion: opcional. Si viene, valida formato numero+unidad.
+  // duracion: opcional. Si viene, valida formato.
   const dur = normalizeText(item.duracion);
   if (dur && !DURACION_RE.test(dur)) {
     return {
       ok: false,
-      error: `${label}: duracion con formato invalido (ej: 7 dias, 2 semanas).`,
+      error: `${label}: duracion solo debe contener letras y números.`,
     };
   }
 
   return {
     ok: true,
     value: {
-      nombre: nombreRes.value,
+      nombre: nombreCleaned,
       dosis: dosisCleaned,
       frecuencia: frecCleaned,
       duracion: dur,
@@ -226,12 +220,27 @@ function validateSignosVitales(obj) {
     if (valStr.length > 50) {
       return { ok: false, error: `signos_vitales.${key} excede el largo maximo.` };
     }
-    if (!SIGNOS_VALUE_RE.test(valStr)) {
-      return {
-        ok: false,
-        error: `signos_vitales.${key} contiene caracteres no permitidos.`,
-      };
+
+    // Reglas especificas por tipo de signo
+    if (key === 'peso') {
+      if (!ALPHA_NUM_RE.test(valStr)) {
+        return { ok: false, error: `El peso solo permite números y letras.` };
+      }
+    } else if (key === 'temperatura' || key === 't' || key === 'temp') {
+      if (!NUMERIC_ONLY_RE.test(valStr)) {
+        return { ok: false, error: `La temperatura solo permite números.` };
+      }
+    } else if (key === 'presionArterial' || key === 'presion_arterial' || key === 'pa') {
+      if (!NUMERIC_SLASH_RE.test(valStr)) {
+        return { ok: false, error: `La presión solo permite números y el carácter '/'.` };
+      }
+    } else {
+      // Otros campos (observaciones, etc) usan texto medico normal
+      if (!MEDICAL_TEXT_NO_NEWLINE_RE.test(valStr)) {
+        return { ok: false, error: `signos_vitales.${key} contiene caracteres no permitidos.` };
+      }
     }
+
     cleaned[key] = valStr;
   }
   return { ok: true, value: cleaned };
@@ -245,13 +254,22 @@ function validateDoctorInfo(obj) {
 
   for (const key of ALLOWED_DOCTOR_KEYS) {
     if (safe[key] === undefined || safe[key] === null) continue;
-    const r = validateMedicalText(safe[key], {
-      maxLen: 200,
-      fieldName: `doctor_info.${key}`,
-      allowNewlines: false,
-    });
-    if (!r.ok) return r;
-    if (r.value) cleaned[key] = r.value;
+    const val = normalizeText(safe[key]);
+    if (!val) continue;
+
+    if (key === 'firma') {
+      if (!LETTERS_ONLY_RE.test(val)) {
+        return { ok: false, error: `La firma solo permite letras.` };
+      }
+    } else {
+      const r = validateMedicalText(val, {
+        maxLen: 200,
+        fieldName: `doctor_info.${key}`,
+        allowNewlines: false,
+      });
+      if (!r.ok) return r;
+    }
+    cleaned[key] = val.slice(0, 200);
   }
 
   if (!cleaned.firma) cleaned.firma = 'Firma Digital';
@@ -300,13 +318,17 @@ function validateRecetaPayload(body) {
     data.citaid = null;
   }
 
-  // diagnostico (texto medico, opcional)
-  const diagR = validateMedicalText(src.diagnostico, {
-    maxLen: 5000,
-    fieldName: 'diagnostico',
-  });
-  if (!diagR.ok) errors.push(diagR.error);
-  else data.diagnostico = diagR.value;
+  // diagnostico (solo numeros y letras)
+  const rawDiag = normalizeText(src.diagnostico);
+  if (rawDiag) {
+    if (!ALPHA_NUM_RE.test(rawDiag)) {
+      errors.push('El diagnóstico solo permite números y letras.');
+    } else {
+      data.diagnostico = rawDiag.slice(0, 5000);
+    }
+  } else {
+    data.diagnostico = '';
+  }
 
   // instrucciones (texto medico, opcional)
   const instR = validateMedicalText(src.instrucciones, {
