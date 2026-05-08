@@ -743,11 +743,11 @@ router.put('/me/paciente-profile', requireAuth, async (req, res) => {
         : paciente.fechanacimiento
     );
 
-    if (!nextNombres || !nextApellidos || !nextGenero || !nextCedula || !nextTelefono || !nextFechaNacimiento) {
+    if (!nextNombres || !nextApellidos || !nextGenero || !nextTelefono || !nextFechaNacimiento) {
       await client.query('ROLLBACK');
       return res.status(400).json({
         success: false,
-        message: 'nombres, apellidos, fechanacimiento, genero, cedula y telefono son obligatorios.',
+        message: 'nombres, apellidos, fechanacimiento, genero y telefono son obligatorios.',
       });
     }
 
@@ -845,7 +845,7 @@ router.put('/me/paciente-profile', requireAuth, async (req, res) => {
         nextApellidos,
         nextFechaNacimiento,
         nextGenero,
-        nextCedula,
+        nextCedula || null,
         nextTelefono,
         Number(paciente.pacienteid),
       ]

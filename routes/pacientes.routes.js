@@ -108,8 +108,8 @@ router.get(
 router.post('/', requireAuth, requireRole(ADMIN_ROLE_ID), async (req, res) => {
   const { nombres, apellidos, fechanacimiento, genero, cedula, telefono } = req.body;
 
-  if (!nombres || !apellidos || !fechanacimiento || !genero || !cedula || !telefono) {
-    return res.status(400).json({ success: false, message: 'Faltan campos obligatorios.' });
+  if (!nombres || !apellidos || !fechanacimiento || !genero || !telefono) {
+    return res.status(400).json({ success: false, message: 'nombres, apellidos, fechanacimiento, genero y telefono son obligatorios.' });
   }
 
   try {
@@ -122,7 +122,7 @@ router.post('/', requireAuth, requireRole(ADMIN_ROLE_ID), async (req, res) => {
         String(apellidos).trim(),
         String(fechanacimiento).trim(),
         String(genero).trim(),
-        String(cedula).trim(),
+        cedula ? String(cedula).trim() : null,
         String(telefono).trim(),
       ]
     );
@@ -145,8 +145,8 @@ router.put(
   async (req, res) => {
   const { nombres, apellidos, fechanacimiento, genero, cedula, telefono } = req.body;
 
-  if (!nombres || !apellidos || !fechanacimiento || !genero || !cedula || !telefono) {
-    return res.status(400).json({ success: false, message: 'Faltan campos obligatorios.' });
+  if (!nombres || !apellidos || !fechanacimiento || !genero || !telefono) {
+    return res.status(400).json({ success: false, message: 'nombres, apellidos, fechanacimiento, genero y telefono son obligatorios.' });
   }
 
   try {
@@ -165,7 +165,7 @@ router.put(
         String(apellidos).trim(),
         String(fechanacimiento).trim(),
         String(genero).trim(),
-        String(cedula).trim(),
+        cedula ? String(cedula).trim() : null,
         String(telefono).trim(),
         req.params.id,
       ]
