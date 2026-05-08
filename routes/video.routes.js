@@ -24,6 +24,7 @@ const {
   fetchCitaByIdForContext,
   ensureVideoSala,
 } = require("../services/platform-core");
+const { generateLiveKitToken, getLiveKitConfig } = require("../services/livekit.service");
 const { generateZegoRtcToken, getZegoConfig } = require("../services/zego.service");
 const { emitToUser, emitCitaEvent } = require("../realtime/socket");
 
@@ -211,7 +212,7 @@ router.post("/me/citas/:citaId/token", requireAuth, async (req, res) => {
     }
 
     // Asegurar registro en video_salas para auditoria/estado.
-    const sala = await ensureVideoSala(client, { citaId, provider: "zego" });
+    const sala = await ensureVideoSala(client, { citaId, provider: "livekit" });
 
     // Marcar abierta si es el medico el que pide el token (asume que arranca la llamada).
     if (context.roleId === MEDICO_ROLE_ID) {
@@ -229,38 +230,85 @@ router.post("/me/citas/:citaId/token", requireAuth, async (req, res) => {
     const roomId = buildRoomId(citaId);
     const userId = buildUserId({ context });
     const displayName = buildDisplayName(context);
-    const token = generateZegoRtcToken({
-      userId,
-      roomId,
-      effectiveTimeSeconds: TOKEN_TTL_S,
-    });
 
-    return res.json({
-      success: true,
-      serverNow: Date.now(),
-      provider: "zego",
-      zego: {
-        appId: cfg.appId,
-        server: cfg.server,
-        token,
-        roomId,
+    // Prioridad: LiveKit
+    const lkCfg = getLiveKitConfig();
+    if (lkCfg.apiKey && process.env.LIVEKIT_API_SECRET) {
+      const token = generateLiveKitToken({
+        roomName: roomId,
+        participantIdentity: userId,
+        participantName: displayName,
+        ttl: TOKEN_TTL_S,
+      });
+
+      return res.json({
+        success: true,
+        serverNow: Date.now(),
+        provider: "livekit",
+        livekit: {
+          url: lkCfg.url,
+          token,
+          roomId,
+          userId,
+          userName: displayName,
+        },
+        access: {
+          canJoin: true,
+          startsAt: access.window.startMs,
+          endsAt: access.window.endMs,
+          closesAt: access.window.closeAtMs,
+          durationMin: access.window.durationMin,
+        },
+        sala: sala
+          ? {
+              videoSalaId: normalizeText(sala.videosalaid),
+              estado: normalizeText(sala.estado),
+            }
+          : null,
+      });
+    }
+
+    // Fallback: Zego
+    const zegoCfg = getZegoConfig();
+    if (zegoCfg) {
+      const token = generateZegoRtcToken({
         userId,
-        userName: displayName,
-        ttlSeconds: TOKEN_TTL_S,
-      },
-      access: {
-        canJoin: true,
-        startsAt: access.window.startMs,
-        endsAt: access.window.endMs,
-        closesAt: access.window.closeAtMs,
-        durationMin: access.window.durationMin,
-      },
-      sala: sala
-        ? {
-            videoSalaId: normalizeText(sala.videosalaid),
-            estado: normalizeText(sala.estado),
-          }
-        : null,
+        roomId,
+        effectiveTimeSeconds: TOKEN_TTL_S,
+      });
+
+      return res.json({
+        success: true,
+        serverNow: Date.now(),
+        provider: "zego",
+        zego: {
+          appId: zegoCfg.appId,
+          server: zegoCfg.server,
+          token,
+          roomId,
+          userId,
+          userName: displayName,
+          ttlSeconds: TOKEN_TTL_S,
+        },
+        access: {
+          canJoin: true,
+          startsAt: access.window.startMs,
+          endsAt: access.window.endMs,
+          closesAt: access.window.closeAtMs,
+          durationMin: access.window.durationMin,
+        },
+        sala: sala
+          ? {
+              videoSalaId: normalizeText(sala.videosalaid),
+              estado: normalizeText(sala.estado),
+            }
+          : null,
+      });
+    }
+
+    return res.status(500).json({
+      success: false,
+      message: "No hay ningun proveedor de video configurado (LiveKit/Zego).",
     });
   } catch (err) {
     if (client) {
