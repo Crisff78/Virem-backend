@@ -1104,11 +1104,15 @@ router.get("/me/conversaciones", requireAuth, async (req, res) => {
          latest_msg.tipo AS ultimo_tipo,
          latest_msg.created_at AS ultimo_created_at,
          latest_msg.emisor_tipo AS ultimo_emisor_tipo,
-         unread.unread_count
+         unread.unread_count,
+         upm.foto_url AS medico_foto_url,
+         upp.foto_url AS paciente_foto_url
        FROM conversaciones conv
        LEFT JOIN medico m ON m.medicoid = conv.medicoid
        LEFT JOIN especialidad e ON e.especialidadid = m.especialidadid
        LEFT JOIN paciente p ON p.pacienteid = conv.pacienteid
+       LEFT JOIN usuario_perfil upm ON upm.usuarioid::text = m.usuarioid::text
+       LEFT JOIN usuario_perfil upp ON upp.usuarioid::text = p.usuarioid::text
        LEFT JOIN LATERAL (
          SELECT citaid, fechahorainicio, modalidad, estado_codigo
          FROM cita
@@ -1162,11 +1166,13 @@ router.get("/me/conversaciones", requireAuth, async (req, res) => {
         paciente: {
           pacienteid: normalizeText(row.pacienteid),
           nombreCompleto: normalizeText(row.paciente_nombre) || "Paciente",
+          fotoUrl: row.paciente_foto_url || null,
         },
         medico: {
           medicoid: normalizeText(row.medicoid),
           nombreCompleto: normalizeText(row.medico_nombre) || "Medico",
           especialidad: normalizeText(row.especialidad_nombre) || "Medicina General",
+          fotoUrl: row.medico_foto_url || null,
         },
         ultimoMensaje: row.mensajeid
           ? {
