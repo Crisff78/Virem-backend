@@ -31,12 +31,19 @@ function createApp() {
     const corsOptions = {
         origin(origin, callback) {
             if (!origin) return callback(null, true);
-            if (!allowedOrigins.length) {
-                return callback(buildCorsOriginError(origin));
-            }
+            
+            // 1. Check exact matches
             if (allowedOrigins.includes(origin)) {
                 return callback(null, true);
             }
+
+            // 2. Allow any Vercel preview or production deployment
+            if (origin.endsWith(".vercel.app") || origin.endsWith(".onrender.com")) {
+                return callback(null, true);
+            }
+
+            // 3. Fallback: Block with clear reason
+            console.warn(`⚠️ [CORS] Bloqueado origen no permitido: ${origin}`);
             return callback(buildCorsOriginError(origin));
         },
         credentials: true,
