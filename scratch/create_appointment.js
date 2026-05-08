@@ -24,14 +24,14 @@ async function run() {
     if (pacRes.rows.length === 0) throw new Error("Patient not found");
     const paciente = pacRes.rows[0];
 
-    // 3. Metadata IDs from previous inspection
+    // 3. Metadata IDs
     const statusId = 2; // pendiente
     const typeId = 1;   // Videoconsulta
     const tzId = 1;     // America/Santo_Domingo
 
-    // 4. Create Appointment
+    // 4. Create Appointment for 8:50 AM
     const citaId = randomUUID();
-    const start = new Date("2026-05-08T08:42:00-04:00");
+    const start = new Date("2026-05-08T08:50:00-04:00");
     const end = new Date(start.getTime() + 30 * 60 * 1000); 
 
     await client.query(
@@ -62,7 +62,7 @@ async function run() {
     console.log("SUCCESS: Appointment created!");
     console.log(`Doctor: ${medico.nombrecompleto} (${medico.medicoid})`);
     console.log(`Patient: ${paciente.nombres} ${paciente.apellidos} (${paciente.pacienteid})`);
-    console.log(`Time: 8:42 AM Today`);
+    console.log(`Time: 8:50 AM Today`);
     console.log(`Cita ID: ${citaId}`);
 
   } catch (err) {
