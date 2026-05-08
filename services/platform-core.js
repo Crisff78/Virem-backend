@@ -764,13 +764,18 @@ async function createNotification(
       );
       const userContact = userResult.rows[0] || {};
       
-      axios.post(process.env.MAKE_WEBHOOK_URL, {
-        event: "notification",
-        userId,
-        email: userContact.email,
-        telefono: userContact.telefono,
-        ...payload
-      }).catch(e => console.warn("[Webhook] Global webhook failed:", e.message));
+      if (userContact.email) {
+        axios.post(process.env.MAKE_WEBHOOK_URL, {
+          event: "notification",
+          userId,
+          email: userContact.email,
+          to: userContact.email, // Alias for easier mapping
+          telefono: userContact.telefono,
+          ...payload
+        }).catch(e => console.warn("[Webhook] Global webhook failed:", e.message));
+      } else {
+        console.warn(`[Webhook] Skipping notification webhook for user ${userId}: email is missing.`);
+      }
     } catch (err) {
       console.warn("[Webhook] Failed to fetch user contact for webhook:", err.message);
     }

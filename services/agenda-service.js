@@ -923,9 +923,13 @@ async function createMyCita({
         }
 
         // 2. Make.com / n8n Webhook trigger
-        if (process.env.MAKE_WEBHOOK_URL) {
-          axios.post(process.env.MAKE_WEBHOOK_URL, invoiceData)
-            .catch(e => console.warn("[Webhook] Invoice webhook failed:", e.message));
+        if (process.env.MAKE_WEBHOOK_URL && invoiceData.pacienteEmail) {
+          axios.post(process.env.MAKE_WEBHOOK_URL, {
+            ...invoiceData,
+            to: invoiceData.pacienteEmail, // Alias for easier mapping in Make/Gmail
+          }).catch(e => console.warn("[Webhook] Invoice webhook failed:", e.message));
+        } else if (process.env.MAKE_WEBHOOK_URL && !invoiceData.pacienteEmail) {
+          console.warn("[Webhook] Skipping invoice webhook: pacienteEmail is missing.");
         }
       } else {
         console.warn("[Automation] Skip invoice generation: citaPayload is null");

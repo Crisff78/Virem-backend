@@ -233,13 +233,16 @@ async function sendRecoveryCodeEmail({ email, code }) {
   // Si tenemos Webhook de Make, enviamos los datos allí primero
   if (makeWebhookUrl) {
     try {
-      await axios.post(makeWebhookUrl, {
-        type: 'recovery_code',
-        email: email,
-        code: code,
-        timestamp: new Date().toISOString()
-      });
-      console.log(`✅ Código de recuperación enviado a Make.com para ${email}`);
+      if (email) {
+        await axios.post(makeWebhookUrl, {
+          type: 'recovery_code',
+          email: email,
+          to: email, // Alias for easier mapping
+          code: code,
+          timestamp: new Date().toISOString()
+        });
+        console.log(`✅ Código de recuperación enviado a Make.com para ${email}`);
+      }
       return { delivered: true };
     } catch (makeError) {
       console.error(`❌ Error enviando recuperación a Make.com: ${makeError.message}`);
@@ -293,14 +296,17 @@ async function sendEmailVerificationCodeEmail({ email, code }) {
   // Si tenemos Webhook de Make, enviamos los datos allí primero
   if (makeWebhookUrl) {
     try {
-      await axios.post(makeWebhookUrl, {
-        type: 'verification_code',
-        email: email,
-        code: code,
-        verificationLink: verificationLink,
-        timestamp: new Date().toISOString()
-      });
-      console.log(`✅ Datos enviados a Make.com Webhook para ${email}`);
+      if (email) {
+        await axios.post(makeWebhookUrl, {
+          type: 'verification_code',
+          email: email,
+          to: email, // Alias for easier mapping
+          code: code,
+          verificationLink: verificationLink,
+          timestamp: new Date().toISOString()
+        });
+        console.log(`✅ Datos enviados a Make.com Webhook para ${email}`);
+      }
       return { delivered: true };
     } catch (makeError) {
       console.error(`❌ Error enviando a Make.com: ${makeError.message}`);
