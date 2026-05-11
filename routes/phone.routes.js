@@ -1,14 +1,24 @@
 const express = require('express');
 
 const router = express.Router();
-const fetch = require('node-fetch');
-const fetchFn = (...args) => {
-  if (typeof fetch === 'function') {
-    return fetch(...args);
-  }
+const axios = require('axios');
 
-  return import('node-fetch').then(({ default: fetchModule }) => fetchModule(...args));
-};
+async function fetchFn(url) {
+  try {
+    const response = await axios.get(url, { validateStatus: () => true });
+    return {
+      ok: response.status >= 200 && response.status < 300,
+      status: response.status,
+      json: async () => response.data
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      status: 500,
+      json: async () => ({ message: err.message })
+    };
+  }
+}
 
 
 const VERIPHONE_API_KEY = process.env.VERIPHONE_API_KEY;
