@@ -815,8 +815,9 @@ router.post("/register", authLimiter, async (req, res) => {
   const { nombres, apellidos, fechanacimiento, genero, cedula, telefono, email, password } = req.body;
   const normalizedEmail = String(email || "").toLowerCase().trim();
 
-  const client = await pool.connect();
+  let client;
   try {
+    client = await pool.connect();
     await client.query("BEGIN");
     const existing = await client.query("SELECT usuarioid FROM usuario WHERE email = $1", [normalizedEmail]);
     if (existing.rows.length > 0) {
@@ -880,8 +881,9 @@ router.post("/register-medico", authLimiter, async (req, res) => {
   const { nombreCompleto, fechanacimiento, genero, especialidad, cedula, telefono, fotoUrl, email, password, documentos, exequaturValidationToken } = req.body;
   const normalizedEmail = String(email || "").toLowerCase().trim();
 
-  const client = await pool.connect();
+  let client;
   try {
+    client = await pool.connect();
     await client.query("BEGIN");
     const existing = await client.query("SELECT usuarioid FROM usuario WHERE email = $1", [normalizedEmail]);
     if (existing.rows.length > 0) {
@@ -930,8 +932,9 @@ router.post("/register-medico", authLimiter, async (req, res) => {
 router.post("/register/confirm", authLimiter, async (req, res) => {
   const { email, codigo } = req.body;
   const normalizedEmail = String(email || "").toLowerCase().trim();
-  const client = await pool.connect();
+  let client;
   try {
+    client = await pool.connect();
     await client.query("BEGIN");
     const verif = await verifyPendingRegistration(client, { email: normalizedEmail, codigo });
     if (!verif.ok) {
