@@ -1,6 +1,7 @@
 const express = require("express");
 const { randomUUID } = require("crypto");
 const pool = require("../config/db");
+const { getPagination } = require("../utils/pagination");
 const { requireAuth } = require("./middleware/auth");
 const {
   ADMIN_ROLE_ID,
@@ -176,6 +177,7 @@ function sanitizeMedicoForAudience(row, actor, options = {}) {
 // Endpoint: GET /api/medicos
 // ===============================
 router.get("/", requireAuth, async (req, res) => {
+  const { limit, offset } = getPagination(req.query);
   const especialidadQuery = String(req.query?.especialidad || "").trim();
   const ubicacionQuery = String(req.query?.ubicacion || "").trim();
   const modalidadQuery = normalizeComparableText(req.query?.modalidad || "");
@@ -219,6 +221,7 @@ router.get("/", requireAuth, async (req, res) => {
     }
 
     const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+    params.push(limit, offset);
 
     const result = await pool.query(
       `WITH rating AS (
@@ -273,7 +276,8 @@ router.get("/", requireAuth, async (req, res) => {
           LIMIT 1
         ) mp ON TRUE
        ${whereClause}
-       ORDER BY COALESCE(NULLIF(m.cedula,''), m.medicoid::text), m.fecharegistro DESC, m.medicoid DESC`
+       ORDER BY COALESCE(NULLIF(m.cedula,''), m.medicoid::text), m.fecharegistro DESC, m.medicoid DESC
+       LIMIT $${params.length - 1} OFFSET $${params.length}`
       ,
       params
     );
@@ -291,7 +295,8 @@ router.get("/", requireAuth, async (req, res) => {
 // API: Listar especialidades
 // Endpoint: GET /api/medicos/especialidades
 // ===============================
-router.get("/especialidades", requireAuth, async (_req, res) => {
+router.get("/especialidades", requireAuth, async (req, res) => {
+  const { limit, offset } = getPagination(req.query, { defaultLimit: 100 });
   try {
     const result = await pool.query(
       `SELECT
@@ -303,7 +308,9 @@ router.get("/especialidades", requireAuth, async (_req, res) => {
        FROM especialidad e
        LEFT JOIN medico m ON m.especialidadid = e.especialidadid
        GROUP BY e.especialidadid, e.nombre, e.permite_presencial, e.permite_virtual
-       ORDER BY lower(e.nombre) ASC`
+       ORDER BY lower(e.nombre) ASC, e.especialidadid
+       LIMIT $1 OFFSET $2`,
+      [limit, offset]
     );
     return res.json({
       success: true,
@@ -620,6 +627,7 @@ router.delete("/:id", requireAuth, requireRole(ADMIN_ROLE_ID), async (req, res) 
 // Finanzas personales del médico autenticado
 // ===============================
 router.get("/me/finanzas", requireAuth, async (req, res) => {
+  const { limit, offset } = getPagination(req.query, { defaultLimit: 20, maxLimit: 100 });
   let client;
   try {
     client = await pool.connect();
@@ -727,9 +735,9 @@ router.get("/me/finanzas", requireAuth, async (req, res) => {
          FROM cita c
          JOIN paciente p ON p.pacienteid = c.pacienteid
          WHERE c.medicoid::text = $1
-         ORDER BY c.fechahorainicio DESC
-         LIMIT 20`,
-        [medicoid]
+         ORDER BY c.fechahorainicio DESC, c.citaid DESC
+         LIMIT $2 OFFSET $3`,
+        [medicoid, limit, offset]
       ),
     ]);
 

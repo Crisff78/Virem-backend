@@ -527,7 +527,7 @@ async function createMyCita({
   try {
     const citaId = randomUUID();
     client = await pool.connect();
-    await client.query("BEGIN");
+    await client.query("BEGIN ISOLATION LEVEL READ COMMITTED");
 
     const context = await resolveUserContext(client, reqUser);
     if (context.error) {
@@ -1207,7 +1207,7 @@ async function rescheduleMyCita({
   let client;
   try {
     client = await pool.connect();
-    await client.query("BEGIN");
+    await client.query("BEGIN ISOLATION LEVEL READ COMMITTED");
 
     const context = await resolveUserContext(client, reqUser);
     if (context.error) {
@@ -1382,6 +1382,7 @@ async function rescheduleMyCita({
 
     const conflict = await hasCitaConflict(client, {
       medicoId: cita.medicoid,
+      pacienteId: Number(cita.pacienteid),
       startIso: nextStart.toISOString(),
       endIso: nextEnd.toISOString(),
       excludeCitaId: cleanCitaId,

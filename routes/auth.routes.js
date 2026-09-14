@@ -3,7 +3,7 @@ const axios = require("axios");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const nodemailer = require("nodemailer");
-const { randomUUID, randomInt, createHmac } = require("crypto");
+const { randomUUID, randomInt, createHmac, timingSafeEqual } = require("crypto");
 const pool = require("../config/db");
 const { consultarExequaturSNS } = require("../services/exequatur.provider.js");
 const {
@@ -33,6 +33,105 @@ const { authLimiter, recoveryLimiter } = require("../middleware/rate-limit");
 const router = express.Router();
 const MEDICO_ROLE_ID = 2;
 const PACIENTE_ROLE_ID = 1;
+
+const ADMIN_MFA_TTL_MINUTES = 5;
+const ADMIN_MFA_MAX_ATTEMPTS = 5;
+const ADMIN_MFA_RESEND_SECONDS = 60;
+
+function hashAdminMfaCode(userId, challengeId, code) {
+  const secret = process.env.ADMIN_MFA_SECRET || process.env.JWT_SECRET;
+  if (!secret) throw new Error("Admin MFA secret is not configured");
+  return createHmac("sha256", secret)
+    .update(`admin-mfa::${userId}::${challengeId}::${code}`)
+    .digest("hex");
+}
+
+// Called only after password/account validation, with the usuario row locked.
+// Expected denials are committed by the caller so failed attempts persist.
+async function verifyAdminMfa(client, user, body) {
+  const userId = String(user.usuarioid);
+  const result = await client.query(
+    `SELECT *, expires_at > clock_timestamp() AS unexpired,
+       sent_at > clock_timestamp() - ($2 * INTERVAL '1 second') AS resend_blocked
+     FROM admin_mfa_challenge WHERE usuarioid = $1 FOR UPDATE`,
+    [userId, ADMIN_MFA_RESEND_SECONDS]
+  );
+  const challenge = result.rows[0];
+  const deny = (status, code, message) => ({
+    status, body: { success: false, mfaRequired: true, code, message },
+  });
+  if (challenge?.unexpired && challenge.attempts >= ADMIN_MFA_MAX_ATTEMPTS) {
+    return deny(429, "MFA_LOCKED", "Demasiados intentos. Espera a que expire el codigo y solicita otro.");
+  }
+
+  // Merely sending a challenge ID or a client-side 'verified' flag never logs in.
+  if (body.otp !== undefined && body.resendMfa !== true) {
+    if (!challenge || !challenge.unexpired || challenge.used_at) {
+      return deny(401, "MFA_INVALID", "Codigo invalido o expirado. Solicita un nuevo codigo.");
+    }
+    const otp = typeof body.otp === "string" ? body.otp.trim() : "";
+    const challengeId = typeof body.mfaChallengeId === "string" ? body.mfaChallengeId : "";
+    const candidate = Buffer.from(hashAdminMfaCode(userId, challenge.challenge_id, otp), "hex");
+    const stored = Buffer.from(challenge.code_hash, "hex");
+    const valid = /^\d{6}$/.test(otp) && challengeId === challenge.challenge_id &&
+      candidate.length === stored.length && timingSafeEqual(candidate, stored);
+    if (!valid) {
+      await client.query("UPDATE admin_mfa_challenge SET attempts = attempts + 1 WHERE usuarioid = $1", [userId]);
+      return deny(401, "MFA_INVALID", "Codigo de seguridad invalido.");
+    }
+    const consumed = await client.query(
+      `UPDATE admin_mfa_challenge SET used_at = NOW(), code_hash = ''
+       WHERE usuarioid = $1 AND challenge_id = $2 AND used_at IS NULL
+         AND expires_at > clock_timestamp() AND attempts < $3`,
+      [userId, challengeId, ADMIN_MFA_MAX_ATTEMPTS]
+    );
+    if (consumed.rowCount !== 1) {
+      return deny(401, "MFA_INVALID", "Codigo invalido o expirado. Solicita un nuevo codigo.");
+    }
+    return null;
+  }
+
+  const pending = (id) => ({ status: 202, body: {
+    success: true, mfaRequired: true, mfaChallengeId: id,
+    message: "Introduce el codigo enviado al correo de seguridad de tu cuenta.",
+  } });
+  if (challenge?.unexpired && !challenge.used_at && body.resendMfa !== true) {
+    return pending(challenge.challenge_id);
+  }
+  if (challenge?.resend_blocked) {
+    return deny(429, "MFA_RESEND_LIMIT", "Espera un minuto antes de solicitar otro codigo.");
+  }
+
+  const destination = user.email === "admin@virem.local"
+    ? String(process.env.ADMIN_MFA_EMAIL || "").trim()
+    : user.email;
+  const webhook = new URL(String(process.env.MAKE_WEBHOOK_URL || ""));
+  if (!isValidEmail(destination) || webhook.protocol !== "https:" || webhook.username || webhook.password) {
+    throw new Error("Admin MFA delivery is not configured");
+  }
+  const id = randomUUID();
+  const code = String(randomInt(0, 1000000)).padStart(6, "0");
+  await client.query(
+    `INSERT INTO admin_mfa_challenge (usuarioid, challenge_id, code_hash, expires_at)
+     VALUES ($1, $2, $3, clock_timestamp() + ($4 * INTERVAL '1 minute'))
+     ON CONFLICT (usuarioid) DO UPDATE SET challenge_id = EXCLUDED.challenge_id,
+       code_hash = EXCLUDED.code_hash, expires_at = EXCLUDED.expires_at,
+       sent_at = clock_timestamp(),
+       attempts = CASE WHEN admin_mfa_challenge.expires_at > clock_timestamp()
+                       THEN admin_mfa_challenge.attempts ELSE 0 END,
+       used_at = NULL`,
+    [userId, id, hashAdminMfaCode(userId, id, code), ADMIN_MFA_TTL_MINUTES]
+  );
+  // Preserve Make's form payload. Never return/log the OTP or Axios request config.
+  const payload = new URLSearchParams({
+    type: "admin_2fa", email: destination, code, user: "Admin", timestamp: new Date().toISOString(),
+  });
+  await axios.post(webhook.toString(), payload.toString(), {
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    timeout: 10000, maxRedirects: 0,
+  });
+  return pending(id);
+}
 
 /**
  * Convierte "DD/MM/YYYY" -> "YYYY-MM-DD"
@@ -82,18 +181,13 @@ const RECOVERY_MAX_ATTEMPTS = Math.max(
   Number.parseInt(process.env.RECOVERY_MAX_ATTEMPTS || "5", 10) || 5
 );
 const RECOVERY_CODE_LENGTH = 6;
+const RECOVERY_TICKET_TTL_MINUTES = 15;
 const RECOVERY_HASH_SECRET =
   process.env.RECOVERY_CODE_SECRET ||
   process.env.JWT_SECRET ||
   (isProductionEnv() ? (() => { throw new Error("Falta RECOVERY_CODE_SECRET en producción") })() : "virem-dev-secret-change-me");
 
-let recoveryTableReadyPromise = null;
 let recoveryTransporterCache = undefined;
-
-// Función para forzar la recarga de la configuración SMTP
-function clearSmtpCache() {
-  recoveryTransporterCache = undefined;
-}
 
 function generateRecoveryCode() {
   return String(randomInt(0, 10 ** RECOVERY_CODE_LENGTH)).padStart(
@@ -110,35 +204,14 @@ function hashRecoveryCode(code, email) {
     .digest("hex");
 }
 
-async function ensureRecoveryTable() {
-  if (!recoveryTableReadyPromise) {
-    recoveryTableReadyPromise = pool
-      .query(
-        `CREATE TABLE IF NOT EXISTS password_reset_code (
-          id BIGSERIAL PRIMARY KEY,
-          email TEXT NOT NULL,
-          code_hash TEXT NOT NULL,
-          expires_at TIMESTAMPTZ NOT NULL,
-          attempts INTEGER NOT NULL DEFAULT 0,
-          verified_at TIMESTAMPTZ,
-          used_at TIMESTAMPTZ,
-          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )`
-      )
-      .then(() =>
-        pool.query(
-          `CREATE INDEX IF NOT EXISTS idx_password_reset_code_email_created
-           ON password_reset_code (email, created_at DESC)`
-        )
-      )
-      .catch((err) => {
-        recoveryTableReadyPromise = null;
-        throw err;
-      });
-  }
-
-  return recoveryTableReadyPromise;
+function hashRecoveryTicket(ticket, email) {
+  return createHmac("sha256", RECOVERY_HASH_SECRET)
+    .update(`password-reset-ticket::${email}::${ticket}`)
+    .digest("hex");
 }
+
+// Compatibility helper; recovery tables are provisioned by scripts/migrations.js.
+async function ensureRecoveryTable() {}
 
 function getRecoveryTransporter() {
   if (typeof recoveryTransporterCache !== "undefined") {
@@ -258,7 +331,7 @@ async function sendRecoveryCodeEmail({ email, code }) {
       );
     }
 
-    console.warn(`[RECOVERY] Codigo para ${email}: ${code}`);
+    console.warn("[RECOVERY] Envio no disponible; respuesta de desarrollo habilitada.");
     return { delivered: false, devCode: code };
   }
 
@@ -275,9 +348,7 @@ async function sendRecoveryCodeEmail({ email, code }) {
       throw error;
     }
 
-    console.warn(
-      `[RECOVERY] Fallback local para ${email}: ${code} (${error?.message || "sendMail failed"})`
-    );
+    console.warn("[RECOVERY] Fallo de envio; respuesta de desarrollo habilitada.");
     return { delivered: false, devCode: code };
   }
 
@@ -323,7 +394,7 @@ async function sendEmailVerificationCodeEmail({ email, code }) {
       );
     }
 
-    console.warn(`[VERIFY] Codigo para ${email}: ${code}`);
+    console.warn("[VERIFY] Envio no disponible; respuesta de desarrollo habilitada.");
     return { delivered: false, devCode: code };
   }
 
@@ -388,9 +459,7 @@ async function sendEmailVerificationCodeEmail({ email, code }) {
       throw error;
     }
 
-    console.warn(
-      `[VERIFY] Fallback local para ${email}: ${code} (${error?.message || "sendMail failed"})`
-    );
+    console.warn("[VERIFY] Fallo de envio; respuesta de desarrollo habilitada.");
     return { delivered: false, devCode: code };
   }
 
@@ -861,8 +930,7 @@ router.post("/register", authLimiter, async (req, res) => {
     return res.status(500).json({ 
       success: false, 
       message: "Error interno registrando paciente.",
-      error: err.message, // Exponemos el mensaje para debug
-      stack: process.env.NODE_ENV === 'production' ? undefined : err.stack
+      error: "Error interno registrando paciente."
     });
   } finally {
     if (client) client.release();
@@ -922,7 +990,7 @@ router.post("/register-medico", authLimiter, async (req, res) => {
     return res.status(500).json({ 
       success: false, 
       message: "Error interno registrando médico.",
-      error: process.env.NODE_ENV === 'production' ? undefined : err.message
+      error: "Error interno registrando médico."
     });
   } finally {
     if (client) client.release();
@@ -938,7 +1006,9 @@ router.post("/register/confirm", authLimiter, async (req, res) => {
     await client.query("BEGIN");
     const verif = await verifyPendingRegistration(client, { email: normalizedEmail, codigo });
     if (!verif.ok) {
-      await client.query("ROLLBACK");
+      // Incorrect/expired OTPs mutate attempts or delete the expired row.
+      // Commit these expected failures; only unexpected errors are rolled back.
+      await client.query("COMMIT");
       return res.status(400).json({ success: false, message: verif.message });
     }
 
@@ -947,12 +1017,12 @@ router.post("/register/confirm", authLimiter, async (req, res) => {
     let usuarioid = null;
 
     if (roleId === MEDICO_ROLE_ID) {
-      const passwordhash = await bcrypt.hash(String(body.password), 10);
+      const passwordhash = body.passwordHash;
       const ins = await client.query(
         `INSERT INTO usuario (rolid, email, passwordhash, fechacreacion, activo, account_status, email_verificado, email_verificado_at, aprobado_por_admin)
-         VALUES ($1,$2,$3,NOW(),TRUE,'activa',TRUE,NOW(),TRUE)
+         VALUES ($1,$2,$3,NOW(),FALSE,$4,TRUE,NOW(),FALSE)
          RETURNING usuarioid`,
-        [roleId, normalizedEmail, passwordhash]
+        [roleId, normalizedEmail, passwordhash, ACCOUNT_STATUS.PENDING_APPROVAL]
       );
       usuarioid = ins.rows[0].usuarioid;
       const medico = await insertMedicoCompatible({
@@ -975,7 +1045,7 @@ router.post("/register/confirm", authLimiter, async (req, res) => {
         await saveMedicoDocument(client, { usuarioid, medicoid: String(medico.medicoid || ""), tipo: "certificado_especialidad", nombre: "Certificado de especialidad", archivoUrl: body.documentos.certificadoEspecialidadUrl });
       }
     } else {
-      const passwordhash = await bcrypt.hash(String(body.password), 10);
+      const passwordhash = body.passwordHash;
       const ins = await client.query(
         `INSERT INTO usuario (rolid, email, passwordhash, fechacreacion, activo, account_status, email_verificado, email_verificado_at)
          VALUES ($1,$2,$3,NOW(),TRUE,'activa',TRUE,NOW())
@@ -997,14 +1067,19 @@ router.post("/register/confirm", authLimiter, async (req, res) => {
 
     await deletePendingRegistration(client, pendingId);
     await client.query("COMMIT");
-    return res.status(201).json({ success: true, message: "Registro completado con éxito.", usuarioid });
+    return res.status(201).json({
+      success: true,
+      message: "Registro completado con éxito.",
+      usuarioid,
+      ...(roleId === MEDICO_ROLE_ID ? { requiresAdminApproval: true } : {}),
+    });
   } catch (err) {
     if (client) await client.query("ROLLBACK");
     console.error("Error confirming registration:", err);
     return res.status(500).json({ 
       success: false, 
       message: "Error al crear la cuenta.",
-      error: err.message
+      error: "Error al crear la cuenta."
     });
   } finally {
     if (client) client.release();
@@ -1273,7 +1348,7 @@ router.post("/resend-verification", async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "No se pudo reenviar el codigo de verificacion.",
-      error: err?.message || String(err),
+      error: "No se pudo reenviar el codigo de verificacion.",
     });
   } finally {
     if (client) client.release();
@@ -1425,17 +1500,20 @@ router.post("/recovery/verify-code", recoveryLimiter, async (req, res) => {
   try {
     await ensureRecoveryTable();
     client = await pool.connect();
+    await client.query("BEGIN");
 
     const latestCode = await client.query(
-      `SELECT id, code_hash, attempts, expires_at, used_at
+      `SELECT id, code_hash, attempts, expires_at, used_at, verified_at
        FROM password_reset_code
        WHERE email = $1
-       ORDER BY created_at DESC
-       LIMIT 1`,
+       ORDER BY created_at DESC, id DESC
+       LIMIT 1
+       FOR UPDATE`,
       [email]
     );
 
     if (!latestCode.rows.length) {
+      await client.query("COMMIT");
       return res.status(400).json({
         success: false,
         message: "Codigo invalido o expirado.",
@@ -1445,7 +1523,8 @@ router.post("/recovery/verify-code", recoveryLimiter, async (req, res) => {
     const row = latestCode.rows[0];
     const codeId = row.id;
 
-    if (row.used_at) {
+    if (row.used_at || row.verified_at) {
+      await client.query("COMMIT");
       return res.status(400).json({
         success: false,
         message: "Codigo invalido o expirado.",
@@ -1460,6 +1539,7 @@ router.post("/recovery/verify-code", recoveryLimiter, async (req, res) => {
          WHERE id = $1`,
         [codeId]
       );
+      await client.query("COMMIT");
       return res.status(400).json({
         success: false,
         message: "El codigo expiro. Solicita uno nuevo.",
@@ -1468,6 +1548,7 @@ router.post("/recovery/verify-code", recoveryLimiter, async (req, res) => {
 
     const attempts = Number(row.attempts || 0);
     if (attempts >= RECOVERY_MAX_ATTEMPTS) {
+      await client.query("COMMIT");
       return res.status(429).json({
         success: false,
         message: "Superaste el maximo de intentos. Solicita un nuevo codigo.",
@@ -1482,24 +1563,34 @@ router.post("/recovery/verify-code", recoveryLimiter, async (req, res) => {
          WHERE id = $1`,
         [codeId]
       );
+      await client.query("COMMIT");
       return res.status(400).json({
         success: false,
         message: "Codigo incorrecto.",
       });
     }
 
+    const recoveryTicket = randomUUID();
     await client.query(
       `UPDATE password_reset_code
-       SET verified_at = NOW()
+       SET verified_at = NOW(),
+           recovery_ticket_hash = $2,
+           recovery_ticket_expires_at = NOW() + ($3 * INTERVAL '1 minute')
        WHERE id = $1`,
-      [codeId]
+      [codeId, hashRecoveryTicket(recoveryTicket, email), RECOVERY_TICKET_TTL_MINUTES]
     );
+    await client.query("COMMIT");
 
+    res.setHeader("Cache-Control", "no-store");
     return res.json({
       success: true,
       message: "Codigo verificado correctamente.",
+      recoveryTicket,
     });
   } catch (err) {
+    if (client) {
+      try { await client.query("ROLLBACK"); } catch (_) {}
+    }
     console.error("Error recovery/verify-code:", err);
     return res.status(500).json({
       success: false,
@@ -1517,6 +1608,15 @@ router.post("/recovery/verify-code", recoveryLimiter, async (req, res) => {
  * ===============================
  */
 router.post("/recovery/reset-password", async (req, res) => {
+  const recoveryTicket = typeof req.body?.recoveryTicket === "string"
+    ? req.body.recoveryTicket.trim().toLowerCase()
+    : "";
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(recoveryTicket)) {
+    return res.status(403).json({
+      success: false,
+      message: "Debes presentar un ticket de recuperacion valido.",
+    });
+  }
   const email = String(req.body?.email || "")
     .toLowerCase()
     .trim();
@@ -1544,25 +1644,28 @@ router.post("/recovery/reset-password", async (req, res) => {
     client = await pool.connect();
     await client.query("BEGIN");
 
-    const validCodeResult = await client.query(
+    // Match the stored fingerprint of this exact ticket and email, never just
+    // an earlier successful OTP. Hold the row lock until both updates commit.
+    const validTicketResult = await client.query(
       `SELECT id
        FROM password_reset_code
        WHERE email = $1
          AND verified_at IS NOT NULL
          AND used_at IS NULL
-         AND expires_at > NOW()
+         AND recovery_ticket_hash = $2
+         AND recovery_ticket_expires_at > NOW()
        ORDER BY verified_at DESC
        LIMIT 1
        FOR UPDATE`,
-      [email]
+      [email, hashRecoveryTicket(recoveryTicket, email)]
     );
 
-    if (!validCodeResult.rows.length) {
+    if (validTicketResult.rows.length !== 1) {
       await client.query("ROLLBACK");
-      return res.status(400).json({
+      return res.status(401).json({
         success: false,
         message:
-          "Debes validar un codigo de recuperacion vigente antes de cambiar la contrasena.",
+          "El ticket de recuperacion es invalido o ha expirado. Solicita un nuevo codigo.",
       });
     }
 
@@ -1584,22 +1687,41 @@ router.post("/recovery/reset-password", async (req, res) => {
     }
 
     const userId = userResult.rows[0].usuarioid;
-    const codeId = validCodeResult.rows[0].id;
+    const codeId = validTicketResult.rows[0].id;
     const nextHash = await bcrypt.hash(newPassword, 10);
 
-    await client.query(
+    const passwordUpdateResult = await client.query(
       `UPDATE usuario
        SET passwordhash = $1
        WHERE usuarioid = $2`,
       [nextHash, userId]
     );
+    if (passwordUpdateResult.rowCount !== 1) {
+      throw new Error("Password recovery did not update exactly one user");
+    }
 
-    await client.query(
+    const consumedTicketResult = await client.query(
       `UPDATE password_reset_code
-       SET used_at = NOW()
-       WHERE id = $1`,
-      [codeId]
+       SET used_at = NOW(),
+           recovery_ticket_hash = NULL,
+           recovery_ticket_expires_at = NULL
+       WHERE id = $1
+         AND email = $2
+         AND recovery_ticket_hash = $3
+         AND verified_at IS NOT NULL
+         AND used_at IS NULL
+         AND recovery_ticket_expires_at > clock_timestamp()`,
+      [codeId, email, hashRecoveryTicket(recoveryTicket, email)]
     );
+    if (consumedTicketResult.rowCount !== 1) {
+      // Also roll back the password if the ticket expired during hashing.
+      await client.query("ROLLBACK");
+      return res.status(401).json({
+        success: false,
+        message:
+          "El ticket de recuperacion es invalido o ha expirado. Solicita un nuevo codigo.",
+      });
+    }
 
     await client.query("COMMIT");
     return res.json({
@@ -1628,7 +1750,7 @@ router.post("/recovery/reset-password", async (req, res) => {
  * ===============================
  */
 router.post("/login", authLimiter, async (req, res) => {
-  const { email, password } = req.body;
+  const { email, password } = req.body || {};
   const normalizedEmail = String(email || "").toLowerCase().trim();
 
   if (!normalizedEmail || !password) {
@@ -1639,17 +1761,20 @@ router.post("/login", authLimiter, async (req, res) => {
   }
 
   let client;
+  let transactionOpen = false;
 
   try {
     await ensureRfCoreSchema();
     client = await pool.connect();
+    await client.query("BEGIN");
+    transactionOpen = true;
 
     let searchEmail = normalizedEmail;
     if (normalizedEmail === 'admin') {
       searchEmail = 'admin@virem.local';
     }
 
-    let result = await client.query(
+    const result = await client.query(
       `SELECT
          usuarioid,
          rolid,
@@ -1660,24 +1785,9 @@ router.post("/login", authLimiter, async (req, res) => {
          account_status,
          email_verificado
        FROM usuario
-       WHERE email = $1`,
+       WHERE email = $1 FOR UPDATE`,
       [searchEmail]
     );
-
-    // Auto-provision Admin if missing (SOLO EN DESARROLLO/TEST)
-    if (result.rows.length === 0 && normalizedEmail === 'admin' && !isProductionEnv()) {
-      const defaultAdminPass = 'AdminPassword123!';
-      if (password === defaultAdminPass) {
-        const passwordhash = await bcrypt.hash(defaultAdminPass, 10);
-        const ins = await client.query(
-          `INSERT INTO usuario (rolid, email, passwordhash, fechacreacion, activo, account_status, email_verificado, aprobado_por_admin)
-           VALUES ($1, $2, $3, NOW(), TRUE, 'activa', TRUE, TRUE)
-           RETURNING *`,
-          [3, searchEmail, passwordhash]
-        );
-        result = ins;
-      }
-    }
 
     if (result.rows.length === 0) {
       return res.status(401).json({ success: false, message: "Credenciales inválidas." });
@@ -1703,13 +1813,25 @@ router.post("/login", authLimiter, async (req, res) => {
       return res.status(500).json({ success: false, message: "Falta JWT_SECRET en el .env" });
     }
 
+    if (Number(user.rolid) === 3) {
+      const mfaResult = await verifyAdminMfa(client, user, req.body);
+      if (mfaResult) {
+        await client.query("COMMIT");
+        transactionOpen = false;
+        return res.status(mfaResult.status).json(mfaResult.body);
+      }
+    }
+
+    const userPayload = await buildAuthUserPayload(client, user);
+
     const token = jwt.sign(
       { usuarioid: user.usuarioid, rolid: user.rolid, email: user.email },
       process.env.JWT_SECRET,
       { expiresIn: "7d" }
     );
 
-    const userPayload = await buildAuthUserPayload(client, user);
+    await client.query("COMMIT");
+    transactionOpen = false;
 
     return res.json({
       success: true,
@@ -1718,9 +1840,13 @@ router.post("/login", authLimiter, async (req, res) => {
       user: userPayload,
     });
   } catch (err) {
-    console.error("Error login:", err);
+    // Axios errors can contain webhook URLs and OTPs in their request config.
+    console.error("Error interno en login o entrega MFA.");
     return res.status(500).json({ success: false, message: "Error interno en login." });
   } finally {
+    if (client && transactionOpen) {
+      try { await client.query("ROLLBACK"); } catch (_) {}
+    }
     if (client) client.release();
   }
 });
@@ -1857,7 +1983,7 @@ router.post("/resend-verification-pending", async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "No se pudo reenviar el código.",
-      error: err?.message || String(err),
+      error: "No se pudo reenviar el código.",
     });
   } finally {
     if (client) client.release();
@@ -1865,44 +1991,5 @@ router.post("/resend-verification-pending", async (req, res) => {
 });
 
 
-/**
- * RUTA DE DIAGNÓSTICO: Envía un correo de prueba usando la config actual.
- * Acceso: http://localhost:3000/api/auth/debug-email
- */
-router.get("/debug-email", async (req, res) => {
-  clearSmtpCache(); // Forzamos recarga de .env
-  const testEmail = req.query.email || process.env.SMTP_USER;
-  
-  try {
-    console.log(`[DEBUG] Iniciando prueba de correo para: ${testEmail}...`);
-    const result = await sendEmailVerificationCodeEmail({ 
-      email: testEmail, 
-      code: "123456" 
-    });
-    
-    if (result.delivered) {
-      return res.status(200).send(`
-        <h1>✅ ¡Éxito!</h1>
-        <p>El correo fue enviado (o los datos se enviaron a <b>Make.com</b>) correctamente para <b>${testEmail}</b>.</p>
-        <p>Revisa tu bandeja de entrada o tu escenario en Make.</p>
-      `);
-    } else {
-      return res.status(200).send(`
-        <h1>⚠️ Modo Fallback</h1>
-        <p>El correo no se envió, pero el servidor está en modo "Consola".</p>
-        <p>El código generado fue: <b>${result.devCode}</b> (mira la terminal del backend).</p>
-      `);
-    }
-  } catch (err) {
-    console.error("[DEBUG] Error en debug-email:", err);
-    return res.status(500).send(`
-      <h1>❌ Error de Envío</h1>
-      <p>Ocurrió un error técnico:</p>
-      <pre>${err.message}</pre>
-      <hr>
-      <p>Verifica que tu App Password de Gmail sea correcta y que el puerto sea 465.</p>
-    `);
-  }
-});
 
 module.exports = router;

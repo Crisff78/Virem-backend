@@ -1,5 +1,6 @@
 const express = require('express');
 const pool = require('../config/db');
+const { getPagination } = require('../utils/pagination');
 const { requireAuth } = require('./middleware/auth');
 const {
   ADMIN_ROLE_ID,
@@ -60,11 +61,14 @@ async function resolvePacienteOwner(req) {
 // Endpoint: GET /api/pacientes
 // ===============================
 router.get('/', requireAuth, requireRole(ADMIN_ROLE_ID), async (req, res) => {
+  const { limit, offset } = getPagination(req.query);
   try {
     const result = await pool.query(
       `SELECT pacienteid, nombres, apellidos, fechanacimiento, genero, cedula, telefono, fecharegistro
        FROM paciente
-       ORDER BY pacienteid DESC`
+       ORDER BY pacienteid DESC
+       LIMIT $1 OFFSET $2`,
+      [limit, offset]
     );
     return res.json({ success: true, pacientes: result.rows });
   } catch (err) {

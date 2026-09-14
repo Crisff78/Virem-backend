@@ -1,26 +1,12 @@
 const express = require("express");
 const pool = require("../config/db");
+const { getPagination } = require("../utils/pagination");
 const { requireAuth } = require("./middleware/auth");
 const MEDICO_ROLE_ID = 2;
 const PACIENTE_ROLE_ID = 1;
 
 const router = express.Router();
 
-// Asegurar esquema de recetas
-const ensureRecetasSchema = async () => {
-  try {
-    await pool.query(`
-      ALTER TABLE receta_medica 
-      ADD COLUMN IF NOT EXISTS disponible_paciente BOOLEAN DEFAULT TRUE,
-      ADD COLUMN IF NOT EXISTS signos_vitales_json JSONB DEFAULT '{}'::jsonb,
-      ADD COLUMN IF NOT EXISTS ordenes_laboratorio TEXT,
-      ADD COLUMN IF NOT EXISTS doctor_info_json JSONB DEFAULT '{}'::jsonb
-    `);
-  } catch (err) {
-    console.error("Error asegurando esquema de recetas:", err.message);
-  }
-};
-ensureRecetasSchema();
 
 const {
   resolveUserContext,
@@ -147,6 +133,7 @@ router.post("/medico/me/recetas", requireAuth, validateRecetaBody, async (req, r
 
 // MEDICO: Listar sus recetas emitidas
 router.get("/medico/me/recetas", requireAuth, async (req, res) => {
+  const { limit, offset } = getPagination(req.query);
   let client;
   try {
     client = await pool.connect();
@@ -164,8 +151,9 @@ router.get("/medico/me/recetas", requireAuth, async (req, res) => {
        FROM receta_medica r
        LEFT JOIN paciente p ON p.usuarioid = r.pacienteid
        WHERE r.medicoid_text = $1
-       ORDER BY r.created_at DESC`,
-      [medicoid]
+       ORDER BY r.created_at DESC, r.recetaid DESC
+       LIMIT $2 OFFSET $3`,
+      [medicoid, limit, offset]
     );
 
     return res.json({ success: true, recetas: result.rows });
@@ -179,6 +167,7 @@ router.get("/medico/me/recetas", requireAuth, async (req, res) => {
 
 // PACIENTE: Listar sus recetas recibidas
 router.get("/paciente/me/recetas", requireAuth, async (req, res) => {
+  const { limit, offset } = getPagination(req.query);
   let client;
   try {
     client = await pool.connect();
@@ -195,8 +184,9 @@ router.get("/paciente/me/recetas", requireAuth, async (req, res) => {
        FROM receta_medica r
        LEFT JOIN medico m ON m.usuarioid::text = r.medicoid_text
        WHERE r.pacienteid = $1
-       ORDER BY r.created_at DESC`,
-      [context.user.usuarioid]
+       ORDER BY r.created_at DESC, r.recetaid DESC
+       LIMIT $2 OFFSET $3`,
+      [context.user.usuarioid, limit, offset]
     );
 
     return res.json({ success: true, recetas: result.rows });

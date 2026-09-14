@@ -1,10 +1,16 @@
 const { randomUUID } = require("crypto");
 const pool = require("../config/db");
-const { emitToUser } = require("../realtime/socket");
+const { emitToUser, disconnectUserSockets } = require("../realtime/socket");
+const { resolveLoginAccessState } = require("./rf-core");
 const { getUserProfileById } = require("./user-profile.store");
 
 const MEDICO_ROLE_ID = 2;
 const PACIENTE_ROLE_ID = 1;
+const MAX_AVAILABILITY_DAYS = 90;
+
+function isValidDaysCount(value) {
+  return Number.isSafeInteger(value) && value >= 1 && value <= MAX_AVAILABILITY_DAYS;
+}
 const ACTIVE_CITA_CODES = ["pendiente", "confirmada", "reprogramada"];
 
 const CITA_STATUS_DEFS = {
@@ -38,7 +44,6 @@ const CITA_STATUS_DEFS = {
   },
 };
 
-let ensurePlatformSchemaPromise = null;
 let estadoCatalogCache = null;
 
 function normalizeText(value) {
@@ -121,282 +126,8 @@ function isActiveStatusCode(code) {
   return ACTIVE_CITA_CODES.includes(normalizeEstadoCode(code, ""));
 }
 
-async function ensurePlatformSchema() {
-  if (ensurePlatformSchemaPromise) return ensurePlatformSchemaPromise;
-
-  ensurePlatformSchemaPromise = (async () => {
-    // Helper function for accent-insensitive search
-    await pool.query(
-      `CREATE OR REPLACE FUNCTION f_unaccent(text) RETURNS text AS $$
-       SELECT translate($1, 'áéíóúÁÉÍÓÚäëïöüÄËÏÖÜñÑ', 'aeiouAEIOUaeiouAEIOUnN');
-       $$ LANGUAGE sql IMMUTABLE;`
-    );
-
-    await pool.query(
-      `ALTER TABLE paciente
-       ADD COLUMN IF NOT EXISTS usuarioid INTEGER`
-    );
-    await pool.query(
-      `ALTER TABLE medico
-       ADD COLUMN IF NOT EXISTS usuarioid INTEGER`
-    );
-
-    await pool.query(
-      `ALTER TABLE especialidad
-       ADD COLUMN IF NOT EXISTS permite_presencial BOOLEAN NOT NULL DEFAULT TRUE`
-    );
-    await pool.query(
-      `ALTER TABLE especialidad
-       ADD COLUMN IF NOT EXISTS permite_virtual BOOLEAN NOT NULL DEFAULT TRUE`
-    );
-
-    await pool.query(
-      `ALTER TABLE horario_disponible
-       ADD COLUMN IF NOT EXISTS especialidadid INTEGER`
-    );
-    await pool.query(
-      `ALTER TABLE horario_disponible
-       ADD COLUMN IF NOT EXISTS modalidad VARCHAR(16) NOT NULL DEFAULT 'ambas'`
-    );
-    await pool.query(
-      `ALTER TABLE horario_disponible
-       ADD COLUMN IF NOT EXISTS slot_minutos INTEGER NOT NULL DEFAULT 30`
-    );
-    await pool.query(
-      `ALTER TABLE horario_disponible
-       ADD COLUMN IF NOT EXISTS bloqueado BOOLEAN NOT NULL DEFAULT FALSE`
-    );
-    await pool.query(
-      `ALTER TABLE horario_disponible
-       ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`
-    );
-
-    await pool.query(
-      `ALTER TABLE estado_cita
-       ADD COLUMN IF NOT EXISTS codigo VARCHAR(40)`
-    );
-
-    await pool.query(
-      `ALTER TABLE cita
-       ADD COLUMN IF NOT EXISTS modalidad VARCHAR(16) NOT NULL DEFAULT 'presencial'`
-    );
-    await pool.query(
-      `ALTER TABLE cita
-       ADD COLUMN IF NOT EXISTS motivo_consulta TEXT`
-    );
-    await pool.query(
-      `ALTER TABLE cita
-       ADD COLUMN IF NOT EXISTS cancelada_por VARCHAR(16)`
-    );
-    await pool.query(
-      `ALTER TABLE cita
-       ADD COLUMN IF NOT EXISTS cancelacion_motivo TEXT`
-    );
-    await pool.query(
-      `ALTER TABLE cita
-       ADD COLUMN IF NOT EXISTS reprogramada_desde_citaid UUID`
-    );
-    await pool.query(
-      `ALTER TABLE cita
-       ADD COLUMN IF NOT EXISTS disponibilidadid INTEGER`
-    );
-    await pool.query(
-      `ALTER TABLE cita
-       ADD COLUMN IF NOT EXISTS estado_codigo VARCHAR(40) NOT NULL DEFAULT 'pendiente'`
-    );
-    await pool.query(
-      `ALTER TABLE cita
-       ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`
-    );
-    await pool.query(
-      `ALTER TABLE cita
-       ADD COLUMN IF NOT EXISTS reminders_sent JSONB NOT NULL DEFAULT '{}'::jsonb`
-    );
-    await pool.query(
-      `ALTER TABLE cita
-       ADD COLUMN IF NOT EXISTS videosalaid UUID`
-    );
-
-    await pool.query(
-      `CREATE TABLE IF NOT EXISTS medico_especialidad (
-        id BIGSERIAL PRIMARY KEY,
-        medicoid UUID NOT NULL REFERENCES medico(medicoid) ON DELETE CASCADE,
-        especialidadid INTEGER NOT NULL REFERENCES especialidad(especialidadid) ON DELETE RESTRICT,
-        activo BOOLEAN NOT NULL DEFAULT TRUE,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        UNIQUE (medicoid, especialidadid)
-      )`
-    );
-
-    await pool.query(
-      `CREATE TABLE IF NOT EXISTS cita_historial (
-        id BIGSERIAL PRIMARY KEY,
-        citaid UUID NOT NULL REFERENCES cita(citaid) ON DELETE CASCADE,
-        accion VARCHAR(32) NOT NULL,
-        usuario_tipo VARCHAR(16) NOT NULL,
-        usuario_id TEXT,
-        motivo TEXT,
-        datos_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-        fecha_evento TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )`
-    );
-
-    await pool.query(
-      `CREATE TABLE IF NOT EXISTS conversaciones (
-        conversacionid UUID PRIMARY KEY,
-        citaid_origen UUID REFERENCES cita(citaid) ON DELETE SET NULL,
-        pacienteid INTEGER NOT NULL REFERENCES paciente(pacienteid) ON DELETE CASCADE,
-        medicoid UUID NOT NULL REFERENCES medico(medicoid) ON DELETE CASCADE,
-        estado VARCHAR(16) NOT NULL DEFAULT 'activa',
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        UNIQUE (pacienteid, medicoid)
-      )`
-    );
-
-    await pool.query(
-      `CREATE TABLE IF NOT EXISTS mensajes (
-        mensajeid UUID PRIMARY KEY,
-        conversacionid UUID NOT NULL REFERENCES conversaciones(conversacionid) ON DELETE CASCADE,
-        emisor_tipo VARCHAR(16) NOT NULL,
-        emisor_id TEXT NOT NULL,
-        contenido TEXT NOT NULL,
-        tipo VARCHAR(16) NOT NULL DEFAULT 'texto',
-        leido BOOLEAN NOT NULL DEFAULT FALSE,
-        leido_at TIMESTAMPTZ,
-        meta_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )`
-    );
-
-    await pool.query(
-      `CREATE TABLE IF NOT EXISTS video_salas (
-        videosalaid UUID PRIMARY KEY,
-        citaid UUID NOT NULL REFERENCES cita(citaid) ON DELETE CASCADE,
-        proveedor VARCHAR(20) NOT NULL DEFAULT 'jitsi',
-        room_name VARCHAR(120) NOT NULL,
-        token_o_url TEXT,
-        estado VARCHAR(16) NOT NULL DEFAULT 'pendiente',
-        opened_at TIMESTAMPTZ,
-        closed_at TIMESTAMPTZ,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        UNIQUE (citaid)
-      )`
-    );
-
-    await pool.query(
-      `CREATE TABLE IF NOT EXISTS medico_horario_recurrente (
-        medicoid UUID PRIMARY KEY REFERENCES medico(medicoid) ON DELETE CASCADE,
-        pattern JSONB NOT NULL DEFAULT '[]'::jsonb,
-        modalidad VARCHAR(16) NOT NULL DEFAULT 'ambas',
-        slot_minutos INTEGER NOT NULL DEFAULT 30,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )`
-    );
-
-    await pool.query(
-      `CREATE TABLE IF NOT EXISTS notificaciones (
-        notificacionid BIGSERIAL PRIMARY KEY,
-        usuarioid INTEGER NOT NULL REFERENCES usuario(usuarioid) ON DELETE CASCADE,
-        tipo VARCHAR(40) NOT NULL,
-        titulo VARCHAR(180) NOT NULL,
-        contenido TEXT,
-        data_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-        leida BOOLEAN NOT NULL DEFAULT FALSE,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        read_at TIMESTAMPTZ
-      )`
-    );
-
-    await pool.query(
-      `CREATE INDEX IF NOT EXISTS idx_horario_disponible_busqueda
-       ON horario_disponible (medicoid, especialidadid, fechainicio, fechafin, activo, bloqueado)`
-    );
-    await pool.query(
-      `CREATE INDEX IF NOT EXISTS idx_horario_disponible_modalidad
-       ON horario_disponible (modalidad, activo, bloqueado)`
-    );
-    await pool.query(
-      `CREATE INDEX IF NOT EXISTS idx_cita_estado_codigo
-       ON cita (estado_codigo)`
-    );
-    await pool.query(
-      `CREATE INDEX IF NOT EXISTS idx_cita_fecha_inicio
-       ON cita (fechahorainicio)`
-    );
-    await pool.query(
-      `CREATE INDEX IF NOT EXISTS idx_cita_medico_estado_fecha
-       ON cita (medicoid, estado_codigo, fechahorainicio)`
-    );
-    await pool.query(
-      `CREATE INDEX IF NOT EXISTS idx_cita_paciente_estado_fecha
-       ON cita (pacienteid, estado_codigo, fechahorainicio)`
-    );
-    await pool.query(
-      `CREATE INDEX IF NOT EXISTS idx_cita_disponibilidadid
-       ON cita (disponibilidadid)`
-    );
-    await pool.query(
-      `CREATE INDEX IF NOT EXISTS idx_cita_historial_cita_fecha
-       ON cita_historial (citaid, fecha_evento DESC)`
-    );
-    await pool.query(
-      `CREATE INDEX IF NOT EXISTS idx_conversaciones_paciente
-       ON conversaciones (pacienteid, updated_at DESC)`
-    );
-    await pool.query(
-      `CREATE INDEX IF NOT EXISTS idx_conversaciones_medico
-       ON conversaciones (medicoid, updated_at DESC)`
-    );
-    await pool.query(
-      `CREATE INDEX IF NOT EXISTS idx_mensajes_conversacion_fecha
-       ON mensajes (conversacionid, created_at DESC)`
-    );
-    await pool.query(
-      `CREATE INDEX IF NOT EXISTS idx_mensajes_conversacion_leido
-       ON mensajes (conversacionid, leido, created_at DESC)`
-    );
-    await pool.query(
-      `CREATE INDEX IF NOT EXISTS idx_video_salas_estado
-       ON video_salas (estado, created_at DESC)`
-    );
-    await pool.query(
-      `CREATE INDEX IF NOT EXISTS idx_notificaciones_usuario_leida_fecha
-       ON notificaciones (usuarioid, leida, created_at DESC)`
-    );
-
-    await pool.query(
-      `DO $$
-       BEGIN
-         IF NOT EXISTS (
-           SELECT 1 FROM pg_indexes
-           WHERE schemaname = 'public'
-             AND indexname = 'uq_cita_medico_inicio_activa'
-         ) THEN
-           IF NOT EXISTS (
-             SELECT 1
-             FROM (
-               SELECT medicoid, fechahorainicio
-               FROM cita
-               WHERE lower(coalesce(estado_codigo, 'pendiente')) IN ('pendiente', 'confirmada', 'reprogramada')
-               GROUP BY medicoid, fechahorainicio
-               HAVING COUNT(*) > 1
-             ) d
-           ) THEN
-             CREATE UNIQUE INDEX uq_cita_medico_inicio_activa
-             ON cita (medicoid, fechahorainicio)
-             WHERE lower(estado_codigo) IN ('pendiente', 'confirmada', 'reprogramada');
-           END IF;
-         END IF;
-       END $$`
-    );
-  })().catch((err) => {
-    ensurePlatformSchemaPromise = null;
-    throw err;
-  });
-
-  return ensurePlatformSchemaPromise;
-}
+// Compatibility export: schema changes run only through scripts/migrations.js.
+async function ensurePlatformSchema() {}
 
 async function ensureEstadoCatalog(client) {
   if (estadoCatalogCache) return estadoCatalogCache;
@@ -442,7 +173,7 @@ async function ensureEstadoCatalog(client) {
 
 async function getUserById(client, usuarioid) {
   const result = await client.query(
-    `SELECT usuarioid, rolid, email, activo, fechacreacion
+    `SELECT usuarioid, rolid, email, activo, fechacreacion, account_status, email_verificado
      FROM usuario
      WHERE usuarioid = $1
      LIMIT 1`,
@@ -514,10 +245,16 @@ async function getMedicoByUsuarioId(client, usuarioid) {
 async function resolveUserContext(client, reqUser) {
   const user = await getUserById(client, reqUser?.usuarioid);
   if (!user) {
+    disconnectUserSockets(reqUser?.usuarioid);
     return { error: { status: 404, message: "Usuario no encontrado." } };
   }
-  if (!Boolean(user.activo)) {
-    return { error: { status: 403, message: "Usuario inactivo." } };
+  const access = resolveLoginAccessState(user);
+  if (!access.ok) {
+    disconnectUserSockets(user.usuarioid);
+    return { error: { status: 403, message: access.message } };
+  }
+  if (reqUser?.rolid !== undefined && Number(reqUser.rolid) !== Number(user.rolid)) {
+    return { error: { status: 403, message: "Tus permisos cambiaron. Inicia sesion nuevamente." } };
   }
 
   const roleId = Number(user.rolid || 0);
@@ -658,6 +395,15 @@ async function hasCitaConflict(
   client,
   { medicoId, pacienteId, startIso, endIso, excludeCitaId = "" }
 ) {
+  // All reservation writers must call this in a READ COMMITTED transaction.
+  // A transaction-scoped lock exists even when no appointment row exists yet.
+  // Stable ordering also protects one patient booking different doctors at once.
+  const keys = [];
+  if (medicoId) keys.push(`virem:booking:medico:${String(medicoId).trim().toLowerCase()}`);
+  if (pacienteId) keys.push(`virem:booking:paciente:${Number(pacienteId)}`);
+  for (const key of keys.sort()) {
+    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0)) LIMIT 1', [key]);
+  }
   const params = [startIso, endIso, String(excludeCitaId || "")];
   const conditions = [
     "c.fechahorainicio < $2::timestamptz",
@@ -683,8 +429,7 @@ async function hasCitaConflict(
     `SELECT c.citaid::text AS citaid
      FROM cita c
      WHERE ${conditions.join(" AND ")}
-     LIMIT 1
-     FOR UPDATE`,
+     LIMIT 1`,
     params
   );
   return Boolean(result.rows.length);
@@ -698,7 +443,8 @@ async function resolveMedicoUserIds(client, medicoId) {
     `SELECT DISTINCT m.usuarioid::text AS usuarioid
      FROM medico m
      WHERE m.medicoid::text = $1::text
-       AND m.usuarioid IS NOT NULL`,
+       AND m.usuarioid IS NOT NULL
+     LIMIT 1`,
     [cleanMedicoId]
   );
 
@@ -759,7 +505,7 @@ async function createNotification(
     // Try to get user contact info for the webhook
     try {
       const userResult = await client.query(
-        "SELECT email FROM usuario WHERE usuarioid = $1",
+        "SELECT email FROM usuario WHERE usuarioid = $1 LIMIT 1",
         [userId]
       );
       const userContact = userResult.rows[0] || {};
@@ -972,6 +718,7 @@ async function fetchCitaByIdForContext(client, { citaId, context, lock = false }
   const sql = `SELECT
       c.citaid::text AS citaid,
       c.pacienteid::text AS pacienteid,
+      p.usuarioid AS paciente_usuarioid,
       c.medicoid::text AS medicoid,
       c.fechahorainicio,
       c.fechahorafin,
@@ -1200,6 +947,8 @@ function canJoinVideoRoom({ citaStart, roomEstado, roleId }) {
 module.exports = {
   MEDICO_ROLE_ID,
   PACIENTE_ROLE_ID,
+  MAX_AVAILABILITY_DAYS,
+  isValidDaysCount,
   ACTIVE_CITA_CODES,
   CITA_STATUS_DEFS,
   normalizeText,

@@ -22,53 +22,34 @@ if (envValidation.errors.length) {
   process.exit(1);
 }
 
-const { ensureRfCoreSchema } = require("./services/rf-core");
-const { ensurePlatformSchema, ensureEstadoCatalog } = require("./services/platform-core");
-const { ensureUserProfileTable } = require("./services/user-profile.store");
-
-pool.query("SELECT NOW()")
-  .then(async res => {
-    sysLogger.add("Conectado a Supabase correctamente", "SUCCESS");
-    try {
-      sysLogger.add("Inicializando esquemas de base de datos...", "INFO");
-      await Promise.all([
-        ensureRfCoreSchema(),
-        ensurePlatformSchema(),
-        ensureUserProfileTable()
-      ]);
-      
-      await ensureEstadoCatalog(pool);
-      sysLogger.add("Todos los esquemas han sido verificados.", "SUCCESS");
-    } catch (err) {
-      sysLogger.add(`Error inicializando esquemas: ${err.message}`, "ERROR");
-    }
-  })
-  .catch(err => {
-    sysLogger.add(`Error conectando a Supabase: ${err.message}`, "ERROR");
-  });
-
+const { assertSchemaReady } = require("./config/schema-version");
+const { ensureEstadoCatalog } = require("./services/platform-core");
+const { processPendingReminders } = require("./services/reminder-service");
 const PORT = process.env.PORT || 3000;
 
-initializeSocketServer(httpServer);
-
-// Reminder Service Loop
-const { processPendingReminders } = require("./services/reminder-service");
-const REMINDER_INTERVAL_MS = 60000; // 1 minute
-setInterval(() => {
-  processPendingReminders().catch(err => {
-    sysLogger.add(`Error en intervalo de recordatorios: ${err.message}`, "ERROR");
+async function start() {
+  // Read-only readiness check: deploy migrations before starting the application.
+  await assertSchemaReady(pool);
+  await ensureEstadoCatalog(pool);
+  initializeSocketServer(httpServer);
+  setInterval(() => {
+    processPendingReminders().catch(err => {
+      sysLogger.add(`Error en intervalo de recordatorios: ${err.message}`, "ERROR");
+    });
+  }, 60000);
+  httpServer.listen(PORT, "0.0.0.0", () => {
+    sysLogger.add(`Backend corriendo en http://localhost:${PORT}`, "SERVER");
+    sysLogger.add(process.env.MAKE_WEBHOOK_URL
+      ? "Automatización: Make.com activa"
+      : "Automatización: Make.com no configurada (usando fallback SMTP)", "INFO");
+    if (process.env.VERIPHONE_API_KEY) {
+      sysLogger.add("Validación: Veriphone API integrada correctamente", "SUCCESS");
+    }
   });
-}, REMINDER_INTERVAL_MS);
+}
 
-httpServer.listen(PORT, "0.0.0.0", () => {
-  sysLogger.add(`Backend corriendo en http://localhost:${PORT}`, "SERVER");
-  if (process.env.MAKE_WEBHOOK_URL) {
-    sysLogger.add(`Automatización: Make.com activa (${process.env.MAKE_WEBHOOK_URL.substring(0, 40)}...)`, "INFO");
-  } else {
-    sysLogger.add("Automatización: Make.com no configurada (usando fallback SMTP)", "WARNING");
-  }
-  
-  if (process.env.VERIPHONE_API_KEY) {
-    sysLogger.add("Validación: Veriphone API integrada correctamente", "SUCCESS");
-  }
+start().catch(async err => {
+  sysLogger.add(`No se pudo iniciar el backend: ${err.message}`, "ERROR");
+  await pool.end();
+  process.exitCode = 1;
 });

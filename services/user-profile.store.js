@@ -3,7 +3,6 @@ const pool = require("../config/db");
 const USER_PROFILE_TABLE = "usuario_perfil";
 const MAX_PHOTO_URL_LENGTH = 16000000;
 
-let ensureUserProfileTablePromise = null;
 
 function resolveDb(dbClient) {
   if (dbClient && typeof dbClient.query === "function") {
@@ -34,47 +33,8 @@ function isSupportedImageUri(value) {
   );
 }
 
-async function ensureUserProfileTable() {
-  if (!ensureUserProfileTablePromise) {
-    ensureUserProfileTablePromise = (async () => {
-      const existsResult = await pool.query(
-        `SELECT to_regclass('public.${USER_PROFILE_TABLE}') AS table_name`
-      );
-      const exists = Boolean(existsResult.rows[0]?.table_name);
-      if (!exists) {
-        await pool.query(
-          `CREATE TABLE IF NOT EXISTS ${USER_PROFILE_TABLE} (
-            usuarioid TEXT PRIMARY KEY,
-            foto_url TEXT,
-            meta_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-          )`
-        );
-      }
-      await pool.query(
-        `ALTER TABLE ${USER_PROFILE_TABLE}
-         ADD COLUMN IF NOT EXISTS foto_url TEXT`
-      );
-      await pool.query(
-        `ALTER TABLE ${USER_PROFILE_TABLE}
-         ALTER COLUMN foto_url TYPE TEXT`
-      );
-      await pool.query(
-        `ALTER TABLE ${USER_PROFILE_TABLE}
-         ADD COLUMN IF NOT EXISTS meta_json JSONB NOT NULL DEFAULT '{}'::jsonb`
-      );
-      await pool.query(
-        `CREATE INDEX IF NOT EXISTS idx_${USER_PROFILE_TABLE}_updated_at
-         ON ${USER_PROFILE_TABLE} (updated_at DESC)`
-      );
-    })().catch((err) => {
-      ensureUserProfileTablePromise = null;
-      throw err;
-    });
-  }
-
-  return ensureUserProfileTablePromise;
-}
+// Compatibility export: schema changes run only through scripts/migrations.js.
+async function ensureUserProfileTable() {}
 
 async function getUserProfileById(dbClient, usuarioid) {
   if (usuarioid === undefined || usuarioid === null) {

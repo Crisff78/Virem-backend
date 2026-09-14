@@ -1,4 +1,5 @@
 const { createHmac, randomInt, randomUUID } = require("crypto");
+const bcrypt = require("bcrypt");
 const pool = require("../config/db");
 
 const ACCOUNT_STATUS = {
@@ -24,7 +25,6 @@ const EMAIL_HASH_SECRET =
   process.env.JWT_SECRET ||
   "virem-dev-secret-change-me";
 
-let ensureRfCoreSchemaPromise = null;
 
 function resolveDb(dbClient) {
   if (dbClient && typeof dbClient.query === "function") {
@@ -98,384 +98,8 @@ function generateEmailVerificationCode() {
   );
 }
 
-async function ensureRfCoreSchema(dbClient = null) {
-  if (ensureRfCoreSchemaPromise && !dbClient) return ensureRfCoreSchemaPromise;
-
-  const db = resolveDb(dbClient);
-  
-  const setupJob = (async () => {
-    await db.query(
-      `ALTER TABLE paciente
-       ADD COLUMN IF NOT EXISTS usuarioid INTEGER`
-    );
-    await db.query(
-      `ALTER TABLE paciente
-       ALTER COLUMN cedula TYPE VARCHAR(20)`
-    );
-    await db.query(
-      `ALTER TABLE medico
-       ADD COLUMN IF NOT EXISTS usuarioid INTEGER`
-    );
-    await db.query(
-      `ALTER TABLE medico
-       ALTER COLUMN cedula TYPE VARCHAR(20)`
-    );
-
-    await db.query(
-      `ALTER TABLE usuario
-       ADD COLUMN IF NOT EXISTS account_status VARCHAR(40) NOT NULL DEFAULT 'activa'`
-    );
-    await db.query(
-      `ALTER TABLE usuario
-       ADD COLUMN IF NOT EXISTS email_verificado BOOLEAN NOT NULL DEFAULT FALSE`
-    );
-    await db.query(
-      `ALTER TABLE usuario
-       ADD COLUMN IF NOT EXISTS email_verificado_at TIMESTAMPTZ`
-    );
-    await db.query(
-      `ALTER TABLE usuario
-       ADD COLUMN IF NOT EXISTS aprobado_por_admin BOOLEAN NOT NULL DEFAULT FALSE`
-    );
-
-    await db.query(
-      `UPDATE usuario
-       SET account_status = 'activa'
-       WHERE account_status IS NULL
-          OR btrim(account_status) = ''`
-    );
-
-    await db.query(
-      `UPDATE usuario
-       SET email_verificado = TRUE,
-           email_verificado_at = COALESCE(email_verificado_at, NOW())
-       WHERE email_verificado IS DISTINCT FROM TRUE
-         AND account_status = 'activa'`
-    );
-
-    await db.query(
-      `CREATE INDEX IF NOT EXISTS idx_usuario_account_status
-       ON usuario (account_status, rolid, activo)`
-    );
-
-    await db.query(
-      `CREATE TABLE IF NOT EXISTS pending_registration (
-        id BIGSERIAL PRIMARY KEY,
-        email TEXT NOT NULL UNIQUE,
-        registration_data JSONB NOT NULL,
-        role_id INTEGER NOT NULL,
-        verification_code_hash TEXT NOT NULL,
-        expires_at TIMESTAMPTZ NOT NULL,
-        attempts INTEGER NOT NULL DEFAULT 0,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )`
-    );
-
-    await db.query(
-      `CREATE INDEX IF NOT EXISTS idx_pending_registration_email_expires
-       ON pending_registration (email, expires_at)`
-    );
-
-    await db.query(
-      `CREATE TABLE IF NOT EXISTS email_verificacion_code (
-        id BIGSERIAL PRIMARY KEY,
-        usuarioid INTEGER NOT NULL REFERENCES usuario(usuarioid) ON DELETE CASCADE,
-        email TEXT NOT NULL,
-        code_hash TEXT NOT NULL,
-        expires_at TIMESTAMPTZ NOT NULL,
-        attempts INTEGER NOT NULL DEFAULT 0,
-        verified_at TIMESTAMPTZ,
-        used_at TIMESTAMPTZ,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )`
-    );
-
-    await db.query(
-      `CREATE INDEX IF NOT EXISTS idx_email_verificacion_code_email_created
-       ON email_verificacion_code (email, created_at DESC)`
-    );
-
-    await db.query(
-      `CREATE TABLE IF NOT EXISTS medico_documento (
-        documentoid UUID PRIMARY KEY,
-        usuarioid INTEGER NOT NULL REFERENCES usuario(usuarioid) ON DELETE CASCADE,
-        medicoid_text TEXT,
-        tipo VARCHAR(40) NOT NULL,
-        nombre VARCHAR(180),
-        archivo_url TEXT NOT NULL,
-        estado_revision VARCHAR(20) NOT NULL DEFAULT 'pendiente',
-        comentario_admin TEXT,
-        creado_en TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        actualizado_en TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )`
-    );
-
-    await db.query(
-      `CREATE INDEX IF NOT EXISTS idx_medico_documento_usuario_tipo
-       ON medico_documento (usuarioid, tipo, estado_revision, creado_en DESC)`
-    );
-
-    await db.query(
-      `CREATE TABLE IF NOT EXISTS user_modificacion_historial (
-        id BIGSERIAL PRIMARY KEY,
-        usuarioid INTEGER NOT NULL REFERENCES usuario(usuarioid) ON DELETE CASCADE,
-        actor_usuarioid INTEGER REFERENCES usuario(usuarioid) ON DELETE SET NULL,
-        scope VARCHAR(40) NOT NULL,
-        cambios_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-        motivo TEXT,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )`
-    );
-
-    await db.query(
-      `CREATE INDEX IF NOT EXISTS idx_user_modificacion_historial_usuario_fecha
-       ON user_modificacion_historial (usuarioid, created_at DESC)`
-    );
-
-    await db.query(
-      `CREATE TABLE IF NOT EXISTS historia_clinica (
-        historiaid BIGSERIAL PRIMARY KEY,
-        citaid UUID NOT NULL UNIQUE,
-        pacienteid INTEGER NOT NULL,
-        medicoid_text TEXT NOT NULL,
-        diagnostico TEXT NOT NULL,
-        antecedentes TEXT,
-        tratamiento TEXT,
-        observaciones TEXT,
-        duracion_min INTEGER,
-        consentimiento_otorgado BOOLEAN NOT NULL DEFAULT FALSE,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        created_by_usuarioid INTEGER,
-        updated_by_usuarioid INTEGER
-      )`
-    );
-
-    await db.query(
-      `CREATE INDEX IF NOT EXISTS idx_historia_clinica_paciente_fecha
-       ON historia_clinica (pacienteid, created_at DESC)`
-    );
-
-    await db.query(
-      `CREATE INDEX IF NOT EXISTS idx_historia_clinica_medico_fecha
-       ON historia_clinica (medicoid_text, created_at DESC)`
-    );
-
-    await db.query(
-      `CREATE TABLE IF NOT EXISTS pago (
-        pagoid UUID PRIMARY KEY,
-        citaid UUID NOT NULL UNIQUE,
-        pacienteid INTEGER NOT NULL,
-        medicoid_text TEXT,
-        monto NUMERIC(12,2) NOT NULL,
-        moneda CHAR(3) NOT NULL DEFAULT 'DOP',
-        metodo_pago VARCHAR(40) NOT NULL,
-        estado VARCHAR(40) NOT NULL DEFAULT 'simulado_aprobado',
-        referencia_externa TEXT,
-        detalle_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )`
-    );
-
-    await db.query(`ALTER TABLE pago ADD COLUMN IF NOT EXISTS pacienteid INTEGER`);
-    await db.query(`ALTER TABLE pago ADD COLUMN IF NOT EXISTS medicoid_text TEXT`);
-    await db.query(
-      `ALTER TABLE pago ADD COLUMN IF NOT EXISTS moneda CHAR(3) DEFAULT 'DOP'`
-    );
-    await db.query(`ALTER TABLE pago ADD COLUMN IF NOT EXISTS metodo_pago VARCHAR(40)`);
-    await db.query(
-      `ALTER TABLE pago ADD COLUMN IF NOT EXISTS estado VARCHAR(40) DEFAULT 'simulado_aprobado'`
-    );
-    await db.query(`ALTER TABLE pago ADD COLUMN IF NOT EXISTS referencia_externa TEXT`);
-    await db.query(
-      `ALTER TABLE pago ADD COLUMN IF NOT EXISTS detalle_json JSONB DEFAULT '{}'::jsonb`
-    );
-    await db.query(
-      `ALTER TABLE pago ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW()`
-    );
-    await db.query(
-      `ALTER TABLE pago ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()`
-    );
-
-    await db.query(`DO $$
-    BEGIN
-      IF EXISTS (
-        SELECT 1
-        FROM information_schema.columns
-        WHERE table_schema = 'public'
-          AND table_name = 'pago'
-          AND column_name = 'metodopago'
-      ) THEN
-        EXECUTE '
-          UPDATE pago
-          SET metodo_pago = COALESCE(NULLIF(metodo_pago, ''''), metodopago)
-          WHERE (metodo_pago IS NULL OR btrim(metodo_pago) = '''')
-            AND metodopago IS NOT NULL
-        ';
-      END IF;
-
-      IF EXISTS (
-        SELECT 1
-        FROM information_schema.columns
-        WHERE table_schema = 'public'
-          AND table_name = 'pago'
-          AND column_name = 'estadopago'
-      ) THEN
-        EXECUTE '
-          UPDATE pago
-          SET estado = COALESCE(NULLIF(estado, ''''), estadopago)
-          WHERE (estado IS NULL OR btrim(estado) = '''')
-            AND estadopago IS NOT NULL
-        ';
-      END IF;
-
-      IF EXISTS (
-        SELECT 1
-        FROM information_schema.columns
-        WHERE table_schema = 'public'
-          AND table_name = 'pago'
-          AND column_name = 'transactionref'
-      ) THEN
-        EXECUTE '
-          UPDATE pago
-          SET referencia_externa = COALESCE(referencia_externa, transactionref)
-          WHERE referencia_externa IS NULL
-        ';
-      END IF;
-
-      IF EXISTS (
-        SELECT 1
-        FROM information_schema.columns
-        WHERE table_schema = 'public'
-          AND table_name = 'pago'
-          AND column_name = 'fechapago'
-      ) THEN
-        EXECUTE '
-          UPDATE pago
-          SET created_at = COALESCE(created_at, fechapago, NOW()),
-              updated_at = COALESCE(updated_at, fechapago, created_at, NOW())
-          WHERE created_at IS NULL
-             OR updated_at IS NULL
-        ';
-      END IF;
-    END $$`);
-
-    await db.query(
-      `UPDATE pago p
-       SET pacienteid = c.pacienteid,
-           medicoid_text = c.medicoid::text
-       FROM cita c
-       WHERE p.citaid = c.citaid
-         AND (p.pacienteid IS NULL OR p.medicoid_text IS NULL)`
-    );
-    await db.query(
-      `UPDATE pago
-       SET moneda = 'DOP'
-       WHERE moneda IS NULL
-          OR btrim(moneda) = ''`
-    );
-    await db.query(
-      `UPDATE pago
-       SET metodo_pago = 'tarjeta'
-       WHERE metodo_pago IS NULL
-          OR btrim(metodo_pago) = ''`
-    );
-    await db.query(
-      `UPDATE pago
-       SET estado = 'simulado_aprobado'
-       WHERE estado IS NULL
-          OR btrim(estado) = ''`
-    );
-    await db.query(
-      `UPDATE pago
-       SET detalle_json = '{}'::jsonb
-       WHERE detalle_json IS NULL`
-    );
-    await db.query(
-      `UPDATE pago
-       SET created_at = COALESCE(created_at, NOW()),
-           updated_at = COALESCE(updated_at, created_at, NOW())
-       WHERE created_at IS NULL
-          OR updated_at IS NULL`
-    );
-
-    await db.query(
-      `CREATE INDEX IF NOT EXISTS idx_pago_paciente_fecha
-       ON pago (pacienteid, created_at DESC)`
-    );
-
-    await db.query(
-      `CREATE TABLE IF NOT EXISTS factura (
-        facturaid UUID PRIMARY KEY,
-        pagoid UUID NOT NULL REFERENCES pago(pagoid) ON DELETE CASCADE,
-        numero_factura VARCHAR(80) NOT NULL UNIQUE,
-        pacienteid INTEGER NOT NULL,
-        monto NUMERIC(12,2) NOT NULL,
-        moneda CHAR(3) NOT NULL DEFAULT 'DOP',
-        detalle_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )`
-    );
-
-    await db.query(`ALTER TABLE factura ADD COLUMN IF NOT EXISTS pacienteid INTEGER`);
-    await db.query(
-      `ALTER TABLE factura ADD COLUMN IF NOT EXISTS moneda CHAR(3) DEFAULT 'DOP'`
-    );
-    await db.query(
-      `ALTER TABLE factura ADD COLUMN IF NOT EXISTS detalle_json JSONB DEFAULT '{}'::jsonb`
-    );
-    await db.query(
-      `ALTER TABLE factura ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW()`
-    );
-
-    await db.query(
-      `CREATE INDEX IF NOT EXISTS idx_factura_paciente_fecha
-       ON factura (pacienteid, created_at DESC)`
-    );
-
-    await db.query(
-      `CREATE TABLE IF NOT EXISTS valoracion (
-        valoracionid BIGSERIAL PRIMARY KEY,
-        citaid UUID NOT NULL,
-        pacienteid INTEGER NOT NULL,
-        medicoid_text TEXT NOT NULL,
-        puntaje SMALLINT NOT NULL,
-        comentario TEXT,
-        estado_moderacion VARCHAR(20) NOT NULL DEFAULT 'pendiente',
-        moderada_por INTEGER,
-        moderada_en TIMESTAMPTZ,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        CONSTRAINT uq_valoracion_cita UNIQUE (citaid),
-        CONSTRAINT chk_valoracion_puntaje CHECK (puntaje BETWEEN 1 AND 5)
-      )`
-    );
-
-    await db.query(
-      `CREATE TABLE IF NOT EXISTS recovery_tokens (
-        email TEXT PRIMARY KEY,
-        code VARCHAR(10) NOT NULL,
-        expires_at TIMESTAMPTZ NOT NULL,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )`
-    );
-
-    await db.query(
-      `CREATE INDEX IF NOT EXISTS idx_recovery_tokens_expires
-       ON recovery_tokens (expires_at)`
-    );
-  })();
-
-  if (!dbClient) {
-    ensureRfCoreSchemaPromise = setupJob.catch((err) => {
-      ensureRfCoreSchemaPromise = null;
-      throw err;
-    });
-  }
-
-  return setupJob;
-}
+// Compatibility export: schema changes run only through scripts/migrations.js.
+async function ensureRfCoreSchema() {}
 
 function resolveLoginAccessState(userRow, options = {}) {
   const roleId = Number(userRow?.rolid || 0);
@@ -490,7 +114,7 @@ function resolveLoginAccessState(userRow, options = {}) {
       ? Boolean(options.enforceEmailVerification)
       : String(process.env.REQUIRE_EMAIL_VERIFICATION || "true") === "true";
 
-  if (!isActiveFlag) {
+  if (!isActiveFlag && status !== ACCOUNT_STATUS.PENDING_APPROVAL) {
     return {
       ok: false,
       code: "USER_INACTIVE",
@@ -612,6 +236,15 @@ async function createPendingRegistration(
   dbClient,
   { email, registrationData, roleId, ttlMinutes = EMAIL_CODE_TTL_MINUTES }
 ) {
+  // Never accept a client-supplied hash or persist the original password.
+  const { password, ...profileData } = registrationData;
+  if (typeof password !== "string" || !password) {
+    throw new Error("La contrasena es obligatoria.");
+  }
+  const safeRegistrationData = {
+    ...profileData,
+    passwordHash: await bcrypt.hash(password, 10),
+  };
   const db = resolveDb(dbClient);
   await ensureRfCoreSchema(db);
 
@@ -635,7 +268,7 @@ async function createPendingRegistration(
     VALUES ($1, $2, $3, $4, NOW() + ($5 * INTERVAL '1 minute'))`,
     [
       normalizedEmail,
-      JSON.stringify(registrationData),
+      JSON.stringify(safeRegistrationData),
       Number(roleId),
       codeHash,
       Number(ttlMinutes),
@@ -693,11 +326,28 @@ async function verifyPendingRegistration(dbClient, { email, codigo }) {
     return { ok: false, code: "INCORRECT", message: "Código incorrecto." };
   }
 
+  // Keep registrations started before this change usable. Upgrade their
+  // credential only after proving ownership of the OTP; confirmation deletes
+  // the pending row in the same transaction.
+  const registrationData = { ...row.registration_data };
+  if (typeof registrationData.password === "string") {
+    registrationData.passwordHash = await bcrypt.hash(registrationData.password, 10);
+    delete registrationData.password;
+    await db.query(
+      "UPDATE pending_registration SET registration_data = $1 WHERE id = $2",
+      [JSON.stringify(registrationData), row.id]
+    );
+  }
+  if (typeof registrationData.passwordHash !== "string" ||
+      !/^\$2[ab]\$\d{2}\$[./A-Za-z0-9]{53}$/.test(registrationData.passwordHash)) {
+    return { ok: false, code: "INVALID_REGISTRATION", message: "Regístrate de nuevo para actualizar tus credenciales." };
+  }
+
   return {
     ok: true,
     email: normalizedEmail,
     roleId: Number(row.role_id),
-    registrationData: row.registration_data,
+    registrationData,
     pendingId: row.id,
   };
 }
@@ -811,7 +461,11 @@ async function verifyEmailVerificationCode(dbClient, { email, codigo }) {
            WHEN account_status = $1 THEN $2
            ELSE account_status
          END,
-         activo = TRUE
+          activo = CASE
+            WHEN rolid = 2 AND aprobado_por_admin IS DISTINCT FROM TRUE THEN FALSE
+            WHEN account_status = $1 AND rolid <> 2 THEN TRUE
+            ELSE activo
+          END
      WHERE usuarioid = $3`,
     [ACCOUNT_STATUS.PENDING_VERIFICATION, nextStatus, Number(row.usuarioid)]
   );

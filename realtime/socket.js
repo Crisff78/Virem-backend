@@ -1,7 +1,7 @@
 const jwt = require("jsonwebtoken");
 const { Server } = require("socket.io");
 const pool = require("../config/db");
-const { ensureRfCoreSchema } = require("../services/rf-core");
+const { ensureRfCoreSchema, resolveLoginAccessState } = require("../services/rf-core");
 const { getSocketCorsOrigins } = require("../config/env");
 
 let ioInstance = null;
@@ -64,13 +64,13 @@ async function resolveRealtimeContext(usuarioid) {
   const client = await pool.connect();
   try {
     const userResult = await client.query(
-      `SELECT usuarioid, rolid, activo, fechacreacion
+      `SELECT usuarioid, rolid, activo, fechacreacion, account_status, email_verificado
        FROM usuario
        WHERE usuarioid = $1
        LIMIT 1`,
       [userId]
     );
-    if (!userResult.rows.length || !Boolean(userResult.rows[0].activo)) {
+    if (!userResult.rows.length || !resolveLoginAccessState(userResult.rows[0]).ok) {
       return { userId: "", roleId: 0, pacienteId: "", medicoId: "" };
     }
 
@@ -312,6 +312,12 @@ function emitToUser(userId, eventName, payload) {
   emitToRoom(toRoom("user", userId), eventName, payload);
 }
 
+// Account mutations call this only after COMMIT, revoking every room/device.
+function disconnectUserSockets(userId) {
+  const room = toRoom("user", userId);
+  if (ioInstance && room) ioInstance.in(room).disconnectSockets(true);
+}
+
 function emitCitaEvent({
   eventName,
   citaId,
@@ -373,6 +379,7 @@ async function emitCallSignalForCita(socket, eventName, citaId, extraPayload = {
     const auth = getSocketAuth(socket);
     const access = await canAccessCita(client, auth, citaId);
     if (!access.ok) return access;
+    if (!socket.connected) return { ok: false, code: "access_revoked" };
 
     const cleanCitaId = normalizeText(citaId);
     const payload = {
@@ -438,6 +445,29 @@ function initializeSocketServer(httpServer) {
     const medicoId = normalizeText(auth.medicoId);
     const scopes = getSocketRealtimeScopes(socket);
 
+    socket.use(async (packet, next) => {
+      const callback = packet[packet.length - 1];
+      const event = String(packet[0] || "");
+      if ((event === "typing" || event.startsWith("call:") || event.startsWith("rtc:")) &&
+          (!packet[1] || typeof packet[1] !== "object" || Array.isArray(packet[1]))) {
+        respondToSocketAction(callback, { ok: false, code: "payload_invalid" });
+        return;
+      }
+      try {
+        const current = await resolveRealtimeContext(userId);
+        if (!current.userId || current.roleId !== auth.roleId ||
+            current.pacienteId !== pacienteId || current.medicoId !== medicoId) {
+          respondToSocketAction(callback, { ok: false, code: "access_revoked" });
+          socket.disconnect(true);
+          return;
+        }
+        if (socket.connected) next();
+      } catch (_) {
+        respondToSocketAction(callback, { ok: false, code: "server_error" });
+        socket.disconnect(true);
+      }
+    });
+
     socket.join(toRoom("user", userId));
     if (pacienteId) socket.join(toRoom("paciente", pacienteId));
     if (medicoId) {
@@ -469,19 +499,39 @@ function initializeSocketServer(httpServer) {
       scopes.conversations.delete(cleanConversationId);
     });
 
-    socket.on("typing", ({ conversacionId, isTyping }) => {
-      const cleanConversationId = normalizeText(conversacionId);
-      if (!scopes.conversations.has(cleanConversationId)) return;
-
-      const room = toRoom("conversation", cleanConversationId);
-      if (!room) return;
-      socket.to(room).emit("typing", {
-        conversacionId: cleanConversationId,
-        usuarioid: userId,
-        emisorTipo: auth.roleId === PACIENTE_ROLE_ID ? "paciente" : "medico",
-        isTyping: Boolean(isTyping),
-        at: new Date().toISOString(),
-      });
+    socket.on("typing", async (payload, callback) => {
+      let client;
+      try {
+        if (!payload || typeof payload !== "object" || Array.isArray(payload) ||
+            typeof payload.conversacionId !== "string" || typeof payload.isTyping !== "boolean") {
+          respondToSocketAction(callback, { ok: false, code: "payload_invalid" });
+          return;
+        }
+        const cleanConversationId = normalizeText(payload.conversacionId);
+        if (!scopes.conversations.has(cleanConversationId)) {
+          respondToSocketAction(callback, { ok: false, code: "conversation_forbidden" });
+          return;
+        }
+        client = await pool.connect();
+        const access = await canAccessConversation(client, auth, cleanConversationId);
+        if (!access.ok) {
+          respondToSocketAction(callback, access);
+          return;
+        }
+        if (!socket.connected) return;
+        socket.to(toRoom("conversation", cleanConversationId)).emit("typing", {
+          conversacionId: cleanConversationId,
+          usuarioid: userId,
+          emisorTipo: auth.roleId === PACIENTE_ROLE_ID ? "paciente" : "medico",
+          isTyping: payload.isTyping,
+          at: new Date().toISOString(),
+        });
+        respondToSocketAction(callback, { ok: true });
+      } catch (_) {
+        respondToSocketAction(callback, { ok: false, code: "server_error" });
+      } finally {
+        if (client) client.release();
+      }
     });
 
     socket.on("join:admin_monitoring", (callback) => {
@@ -497,33 +547,37 @@ function initializeSocketServer(httpServer) {
       socket.leave("admin_monitoring");
     });
 
-    socket.on("call:invite", async ({ citaId } = {}, cb) => {
-      // Usar emitCitaEvent para notificar al otro extremo
+    socket.on("call:invite", async (payload, cb) => {
+      let client;
       try {
-        const client = await pool.connect();
-        const citaRes = await client.query(
-          "SELECT pacienteid, medicoid FROM cita WHERE citaid::text = $1 LIMIT 1",
-          [normalizeText(citaId)]
-        );
-        if (citaRes.rows.length) {
-          const cita = citaRes.rows[0];
-          const caller = getSocketAuth(socket);
-          const invitePayload = {
-            citaId: normalizeText(citaId),
-            callerRole: caller.roleId === MEDICO_ROLE_ID ? "medico" : "paciente",
-            at: new Date().toISOString(),
-          };
-          
-          // Notificar via socket directo si el usuario esta conectado
-          const toUserId = caller.roleId === MEDICO_ROLE_ID ? cita.pacienteid : cita.medicoid;
-          // (Asumiendo que existe una forma de mapear pacienteid/medicoid a usuarioid o emitir a su sala)
-          emitCitaEvent({ eventName: "call:incoming", citaId, ...invitePayload });
+        if (!payload || typeof payload !== "object" || Array.isArray(payload) ||
+            typeof payload.citaId !== "string" || !normalizeText(payload.citaId)) {
+          respondToSocketAction(cb, { ok: false, code: "payload_invalid" });
+          return;
         }
+        client = await pool.connect();
+        const access = await canAccessCita(client, auth, payload.citaId);
+        if (!access.ok) {
+          respondToSocketAction(cb, access);
+          return;
+        }
+        if (!socket.connected) return;
+        emitCitaEvent({
+          eventName: "call:incoming",
+          citaId: access.cita.citaid,
+          pacienteId: access.cita.pacienteid,
+          medicoId: access.cita.medicoid,
+          extraPayload: {
+            callerRole: auth.roleId === MEDICO_ROLE_ID ? "medico" : "paciente",
+            at: new Date().toISOString(),
+          },
+        });
+        respondToSocketAction(cb, { ok: true });
       } catch (_) {
+        respondToSocketAction(cb, { ok: false, code: "server_error" });
       } finally {
         if (client) client.release();
       }
-      respondToSocketAction(cb, { ok: true });
     });
 
     socket.on("call:accept", async ({ citaId } = {}, cb) => {
@@ -562,7 +616,7 @@ function initializeSocketServer(httpServer) {
         try {
           client = await pool.connect();
           const access = await canAccessCita(client, auth, citaId);
-          if (access.ok && access.cita) {
+          if (access.ok && access.cita && socket.connected) {
             emitToRoom(toRoom("medico", access.cita.medicoid), "patient:in_sala", {
               citaId: normalizeText(access.cita.citaid),
               pacienteId: normalizeText(access.cita.pacienteid),
@@ -625,6 +679,7 @@ module.exports = {
   getIO: requireIo,
   emitToRoom,
   emitToUser,
+  disconnectUserSockets,
   emitCitaEvent,
   emitConversationEvent,
   emitMedicoPresence,

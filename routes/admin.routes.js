@@ -1,15 +1,16 @@
 const express = require("express");
 const pool = require("../config/db");
+const { getPagination } = require("../utils/pagination");
 const { requireAuth } = require("./middleware/auth");
 const {
   ACCOUNT_STATUS,
   ensureRfCoreSchema,
   normalizeText,
   normalizeAccountStatus,
-  listMedicoDocumentsByUsuarioId,
   recordUserModification,
 } = require("../services/rf-core");
 const { ensurePlatformSchema } = require("../services/platform-core");
+const { disconnectUserSockets } = require("../realtime/socket");
 const { ensureUserProfileTable } = require("../services/user-profile.store");
 
 const router = express.Router();
@@ -24,12 +25,6 @@ function toMoney(value, fallback = 0) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return fallback;
   return Math.round(parsed * 100) / 100;
-}
-
-function parseLimit(value, fallback = 80, max = 300) {
-  const parsed = Number.parseInt(String(value || ""), 10);
-  if (!Number.isFinite(parsed)) return fallback;
-  return Math.min(max, Math.max(1, parsed));
 }
 
 function parseRoleFilter(value) {
@@ -217,7 +212,7 @@ router.get("/panel", async (req, res) => {
 // Listado operativo de usuarios para administracion
 // ===============================
 router.get("/usuarios", async (req, res) => {
-  const limit = parseLimit(req.query?.limit, 80, 250);
+  const { limit, offset } = getPagination(req.query, { defaultLimit: 80, maxLimit: 250 });
   const q = normalizeText(req.query?.q || req.query?.search || "");
   const roleFilter = parseRoleFilter(req.query?.rolid || req.query?.rol || "");
   const statusFilter = parseStatusFilter(req.query?.estado || req.query?.accountStatus || "");
@@ -261,7 +256,7 @@ router.get("/usuarios", async (req, res) => {
       )`);
     }
 
-    params.push(limit);
+    params.push(limit, offset);
     const sql = `SELECT
       u.usuarioid,
       u.email,
@@ -305,7 +300,7 @@ router.get("/usuarios", async (req, res) => {
       CASE WHEN u.rolid = 2 AND u.account_status = '${ACCOUNT_STATUS.PENDING_APPROVAL}' THEN 0 ELSE 1 END,
       u.fechacreacion DESC NULLS LAST,
       u.usuarioid DESC
-    LIMIT $${params.length}`;
+    LIMIT $${params.length - 1} OFFSET $${params.length}`;
 
     const result = await client.query(sql, params);
     return res.json({
@@ -349,7 +344,7 @@ router.get("/usuarios", async (req, res) => {
 // Citas con contexto de paciente, medico, chat y video
 // ===============================
 router.get("/citas", async (req, res) => {
-  const limit = parseLimit(req.query?.limit, 80, 250);
+  const { limit, offset } = getPagination(req.query, { defaultLimit: 80, maxLimit: 250 });
   const scope = normalizeText(req.query?.scope || "all").toLowerCase();
   const estado = normalizeText(req.query?.estado || "").toLowerCase();
 
@@ -386,7 +381,7 @@ router.get("/citas", async (req, res) => {
       where.push(`lower(COALESCE(c.estado_codigo, 'pendiente')) = $${params.length}`);
     }
 
-    params.push(limit);
+    params.push(limit, offset);
     const forwardOrder =
       scope === "today" ||
       scope === "hoy" ||
@@ -432,8 +427,8 @@ router.get("/citas", async (req, res) => {
         AND conv.medicoid::text = c.medicoid::text
        LEFT JOIN video_salas vs ON vs.citaid = c.citaid
        ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
-       ORDER BY c.fechahorainicio ${forwardOrder ? "ASC" : "DESC"}
-       LIMIT $${params.length}`,
+       ORDER BY c.fechahorainicio ${forwardOrder ? "ASC" : "DESC"}, c.citaid
+       LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params
     );
 
@@ -476,7 +471,7 @@ router.get("/citas", async (req, res) => {
 // Pagos simulados con factura y participantes
 // ===============================
 router.get("/pagos", async (req, res) => {
-  const limit = parseLimit(req.query?.limit, 80, 250);
+  const { limit, offset } = getPagination(req.query, { defaultLimit: 80, maxLimit: 250 });
   const estado = normalizeText(req.query?.estado || "").toLowerCase();
 
   let client;
@@ -494,7 +489,7 @@ router.get("/pagos", async (req, res) => {
       params.push(estado);
       where.push(`lower(COALESCE(p.estado, 'simulado_aprobado')) = $${params.length}`);
     }
-    params.push(limit);
+    params.push(limit, offset);
 
     const result = await client.query(
       `SELECT
@@ -523,8 +518,8 @@ router.get("/pagos", async (req, res) => {
        LEFT JOIN medico m ON m.medicoid::text = COALESCE(p.medicoid_text, c.medicoid::text)
        LEFT JOIN especialidad e ON e.especialidadid = m.especialidadid
        ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
-       ORDER BY p.created_at DESC NULLS LAST
-       LIMIT $${params.length}`,
+       ORDER BY p.created_at DESC NULLS LAST, p.pagoid DESC
+       LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params
     );
 
@@ -565,8 +560,7 @@ router.get("/pagos", async (req, res) => {
 // Lista medicos pendientes de aprobacion
 // ===============================
 router.get("/medicos/pendientes", async (req, res) => {
-  const limitRaw = Number.parseInt(String(req.query?.limit || "30"), 10);
-  const limit = Number.isFinite(limitRaw) ? Math.min(100, Math.max(1, limitRaw)) : 30;
+  const { limit, offset } = getPagination(req.query, { defaultLimit: 30, maxLimit: 100 });
 
   let client;
   try {
@@ -578,49 +572,54 @@ router.get("/medicos/pendientes", async (req, res) => {
     }
 
     const pending = await client.query(
-      `SELECT
-         u.usuarioid,
-         u.email,
-         u.fechacreacion,
-         u.account_status,
-         m.medicoid::text AS medicoid,
-         m.nombrecompleto,
-         m.cedula,
-         m.telefono,
-         COALESCE(e.nombre, 'Medicina General') AS especialidad,
-         up.foto_url
-       FROM usuario u
-       LEFT JOIN usuario_perfil up ON up.usuarioid::text = u.usuarioid::text
-       LEFT JOIN medico m
-         ON m.usuarioid = u.usuarioid
-       LEFT JOIN especialidad e ON e.especialidadid = m.especialidadid
-       WHERE u.rolid = 2
-         AND u.account_status = $1
-       ORDER BY u.fechacreacion DESC
-       LIMIT $2`,
-      [ACCOUNT_STATUS.PENDING_APPROVAL, limit]
+      `WITH pending_page AS (
+         SELECT u.usuarioid, u.email, u.fechacreacion, u.account_status,
+           m.medicoid::text AS medicoid, m.nombrecompleto, m.cedula, m.telefono,
+           COALESCE(e.nombre, 'Medicina General') AS especialidad, up.foto_url
+         FROM usuario u
+         LEFT JOIN usuario_perfil up ON up.usuarioid::text = u.usuarioid::text
+         LEFT JOIN medico m ON m.usuarioid = u.usuarioid
+         LEFT JOIN especialidad e ON e.especialidadid = m.especialidadid
+         WHERE u.rolid = 2 AND u.account_status = $1
+         ORDER BY u.fechacreacion DESC, u.usuarioid DESC
+         LIMIT $2 OFFSET $3
+       )
+       SELECT p.*, COALESCE(d.items, '[]'::jsonb) AS documentos
+       FROM pending_page p
+       LEFT JOIN LATERAL (
+         SELECT jsonb_agg(to_jsonb(doc) ORDER BY doc.creado_en DESC, doc.documentoid) AS items
+         FROM medico_documento doc WHERE doc.usuarioid = p.usuarioid
+       ) d ON TRUE
+       ORDER BY p.fechacreacion DESC, p.usuarioid DESC`,
+      [ACCOUNT_STATUS.PENDING_APPROVAL, limit, offset]
     );
 
-    const items = [];
-    for (const row of pending.rows) {
-      const usuarioid = Number(row.usuarioid || 0);
-      const docs = await listMedicoDocumentsByUsuarioId(client, usuarioid);
-      items.push({
-        usuarioid,
-        email: normalizeText(row.email),
-        estadoCuenta: normalizeAccountStatus(row.account_status),
-        fechaRegistro: row.fechacreacion || null,
-        medico: {
-          medicoid: normalizeText(row.medicoid),
-          nombreCompleto: normalizeText(row.nombrecompleto),
-          cedula: normalizeText(row.cedula),
-          telefono: normalizeText(row.telefono),
-          especialidad: normalizeText(row.especialidad) || "Medicina General",
-          fotoUrl: normalizeText(row.foto_url) || null,
-        },
-        documentos: docs,
-      });
-    }
+    const items = pending.rows.map(row => ({
+      usuarioid: Number(row.usuarioid || 0),
+      email: normalizeText(row.email),
+      estadoCuenta: normalizeAccountStatus(row.account_status),
+      fechaRegistro: row.fechacreacion || null,
+      medico: {
+        medicoid: normalizeText(row.medicoid),
+        nombreCompleto: normalizeText(row.nombrecompleto),
+        cedula: normalizeText(row.cedula),
+        telefono: normalizeText(row.telefono),
+        especialidad: normalizeText(row.especialidad) || "Medicina General",
+        fotoUrl: normalizeText(row.foto_url) || null,
+      },
+      documentos: (row.documentos || []).map(doc => ({
+        documentoid: normalizeText(doc.documentoid),
+        usuarioid: Number(doc.usuarioid),
+        medicoid: normalizeText(doc.medicoid_text),
+        tipo: normalizeText(doc.tipo),
+        nombre: normalizeText(doc.nombre),
+        archivoUrl: normalizeText(doc.archivo_url),
+        estadoRevision: normalizeText(doc.estado_revision),
+        comentarioAdmin: normalizeText(doc.comentario_admin),
+        creadoEn: doc.creado_en ? new Date(doc.creado_en).toISOString() : null,
+        actualizadoEn: doc.actualizado_en ? new Date(doc.actualizado_en).toISOString() : null,
+      })),
+    }));
 
     return res.json({ success: true, pendientes: items });
   } catch (err) {
@@ -787,6 +786,7 @@ router.patch("/medicos/:usuarioId/rechazar", async (req, res) => {
     });
 
     await client.query("COMMIT");
+    disconnectUserSockets(usuarioId);
     return res.json({
       success: true,
       message: "Solicitud de medico rechazada.",
@@ -810,8 +810,7 @@ router.patch("/medicos/:usuarioId/rechazar", async (req, res) => {
 // ===============================
 router.get("/usuarios/modificaciones", async (req, res) => {
   const usuarioId = Number.parseInt(String(req.query?.usuarioId || ""), 10);
-  const limitRaw = Number.parseInt(String(req.query?.limit || "80"), 10);
-  const limit = Number.isFinite(limitRaw) ? Math.min(300, Math.max(1, limitRaw)) : 80;
+  const { limit, offset } = getPagination(req.query, { defaultLimit: 80, maxLimit: 300 });
 
   let client;
   try {
@@ -828,7 +827,7 @@ router.get("/usuarios/modificaciones", async (req, res) => {
       params.push(usuarioId);
       where.push(`h.usuarioid = $${params.length}`);
     }
-    params.push(limit);
+    params.push(limit, offset);
 
     const sql = `SELECT
       h.id,
@@ -844,8 +843,8 @@ router.get("/usuarios/modificaciones", async (req, res) => {
     LEFT JOIN usuario u ON u.usuarioid = h.usuarioid
     LEFT JOIN usuario actor ON actor.usuarioid = h.actor_usuarioid
     ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
-    ORDER BY h.created_at DESC
-    LIMIT $${params.length}`;
+    ORDER BY h.created_at DESC, h.id DESC
+    LIMIT $${params.length - 1} OFFSET $${params.length}`;
 
     const result = await client.query(sql, params);
 
@@ -882,6 +881,13 @@ router.patch("/usuarios/:usuarioId/estado", async (req, res) => {
   const activo = req.body?.activo;
   const nextStatusRaw = normalizeText(req.body?.accountStatus || req.body?.estadoCuenta || "");
   const motivo = normalizeText(req.body?.motivo || "");
+  const roleProvided = req.body?.rolid !== undefined;
+  const requestedRole = roleProvided ? Number(req.body.rolid) : null;
+
+  if (roleProvided && (!["number", "string"].includes(typeof req.body.rolid) ||
+      !/^[123]$/.test(String(req.body.rolid)))) {
+    return res.status(400).json({ success: false, message: "rolid invalido." });
+  }
 
   if (!Number.isFinite(usuarioId) || usuarioId <= 0) {
     return res.status(400).json({ success: false, message: "usuarioId invalido." });
@@ -899,7 +905,7 @@ router.patch("/usuarios/:usuarioId/estado", async (req, res) => {
     }
 
     const target = await client.query(
-      `SELECT usuarioid, email, activo, account_status
+      `SELECT usuarioid, rolid, email, activo, account_status
        FROM usuario
        WHERE usuarioid = $1
        LIMIT 1
@@ -913,6 +919,7 @@ router.patch("/usuarios/:usuarioId/estado", async (req, res) => {
     }
 
     const before = target.rows[0];
+    const nextRole = roleProvided ? requestedRole : Number(before.rolid);
     const nextActive = activo === undefined ? Boolean(before.activo) : Boolean(activo);
     const nextStatus = nextStatusRaw
       ? normalizeAccountStatus(nextStatusRaw, normalizeAccountStatus(before.account_status))
@@ -921,9 +928,10 @@ router.patch("/usuarios/:usuarioId/estado", async (req, res) => {
     await client.query(
       `UPDATE usuario
        SET activo = $1,
-           account_status = $2
+           account_status = $2,
+           rolid = $4
        WHERE usuarioid = $3`,
-      [nextActive, nextStatus, usuarioId]
+      [nextActive, nextStatus, usuarioId, nextRole]
     );
 
     await recordUserModification(client, {
@@ -932,6 +940,7 @@ router.patch("/usuarios/:usuarioId/estado", async (req, res) => {
       scope: "estado_cuenta",
       motivo,
       changes: {
+        ...(roleProvided ? { rolid: { before: Number(before.rolid), after: nextRole } } : {}),
         activo: {
           before: Boolean(before.activo),
           after: nextActive,
@@ -944,12 +953,16 @@ router.patch("/usuarios/:usuarioId/estado", async (req, res) => {
     });
 
     await client.query("COMMIT");
+    if (!nextActive || nextStatus !== ACCOUNT_STATUS.ACTIVE || nextRole !== Number(before.rolid)) {
+      disconnectUserSockets(usuarioId);
+    }
     return res.json({
       success: true,
       message: "Estado de cuenta actualizado.",
       usuarioid: usuarioId,
       activo: nextActive,
       accountStatus: nextStatus,
+      ...(roleProvided ? { rolid: nextRole } : {}),
     });
   } catch (err) {
     if (client) {
@@ -967,8 +980,7 @@ router.patch("/usuarios/:usuarioId/estado", async (req, res) => {
 // GET /api/admin/valoraciones/pendientes
 // ===============================
 router.get("/valoraciones/pendientes", async (req, res) => {
-  const limitRaw = Number.parseInt(String(req.query?.limit || "80"), 10);
-  const limit = Number.isFinite(limitRaw) ? Math.min(200, Math.max(1, limitRaw)) : 80;
+  const { limit, offset } = getPagination(req.query, { defaultLimit: 80, maxLimit: 200 });
 
   let client;
   try {
@@ -998,9 +1010,9 @@ router.get("/valoraciones/pendientes", async (req, res) => {
        LEFT JOIN medico m ON m.medicoid::text = v.medicoid_text
        LEFT JOIN paciente p ON p.pacienteid = v.pacienteid
        WHERE lower(COALESCE(v.estado_moderacion, 'pendiente')) = 'pendiente'
-       ORDER BY v.created_at DESC
-       LIMIT $1`,
-      [limit]
+       ORDER BY v.created_at DESC, v.valoracionid DESC
+       LIMIT $1 OFFSET $2`,
+      [limit, offset]
     );
 
     return res.json({
@@ -1374,7 +1386,7 @@ router.get("/it-stats", async (req, res) => {
         status: "Critical", 
         uptime: "0%", 
         error: true,
-        details: e.message 
+        details: "No se pudo comprobar la conexion a la base de datos."
       });
     }
 

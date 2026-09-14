@@ -5,6 +5,8 @@ const { requireAuth } = require("./middleware/auth");
 const {
   MEDICO_ROLE_ID,
   PACIENTE_ROLE_ID,
+  MAX_AVAILABILITY_DAYS,
+  isValidDaysCount,
   ACTIVE_CITA_CODES,
   normalizeText,
   normalizeComparableText,
@@ -519,9 +521,7 @@ router.post("/medico/me/disponibilidades", requireAuth, async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "No se pudo crear la disponibilidad.",
-      error: err?.message || String(err),
-      detail: err?.detail || null,
-      hint: err?.hint || null,
+      error: "No se pudo crear la disponibilidad.",
     });
   } finally {
     if (client) client.release();
@@ -746,10 +746,16 @@ router.patch("/medico/me/disponibilidades/:id/bloquear", requireAuth, async (req
 });
 
 router.post("/medico/me/disponibilidades/recurrente", requireAuth, async (req, res) => {
-  const { pattern, modalidad, slotMinutos, daysCount = 30 } = req.body;
-  console.log("[RECURRENTE] Generando con patron:", JSON.stringify(pattern));
+  const { pattern, modalidad, slotMinutos, daysCount = 30 } = req.body || {};
+  if (!isValidDaysCount(daysCount)) {
+    return res.status(400).json({
+      success: false,
+      message: `daysCount debe ser un numero entero entre 1 y ${MAX_AVAILABILITY_DAYS}.`,
+    });
+  }
   
-  if (!Array.isArray(pattern) || pattern.length === 0) {
+  if (!Array.isArray(pattern) || pattern.length === 0 || pattern.length > 7 ||
+      !pattern.every(day => day && Number.isInteger(day.dayOfWeek) && day.dayOfWeek >= 0 && day.dayOfWeek <= 6)) {
     return res.status(400).json({ success: false, message: "Debe enviar un patron de horarios valido." });
   }
 
@@ -845,7 +851,7 @@ router.post("/medico/me/disponibilidades/recurrente", requireAuth, async (req, r
     return res.status(500).json({ 
       success: false, 
       message: "Error generando disponibilidad recurrente.",
-      error: err.message 
+      error: "Error generando disponibilidad recurrente."
     });
   } finally {
     if (client) client.release();
@@ -864,7 +870,8 @@ router.get("/medico/me/recurrente-config", requireAuth, async (req, res) => {
     const result = await client.query(
       `SELECT pattern, modalidad, slot_minutos AS "slotMinutos"
        FROM medico_horario_recurrente
-       WHERE medicoid::text = $1::text`,
+       WHERE medicoid::text = $1::text
+       LIMIT 1`,
       [String(context.medico.medicoid)]
     );
 
@@ -1679,7 +1686,7 @@ router.post("/me/citas/:citaId/video-sala/abrir", requireAuth, async (req, res) 
     await appendSystemMessage(client, { conversacionId, text: systemText });
 
     await createNotification(client, {
-      usuarioid: Number(cita.pacienteid),
+      usuarioid: cita.paciente_usuarioid,
       tipo: "videollamada_disponible",
       titulo: "Videollamada disponible",
       contenido: "Tu medico ya inició la sala de consulta virtual.",
@@ -1841,7 +1848,7 @@ router.post("/me/citas/:citaId/video-sala/finalizar", requireAuth, async (req, r
     await appendSystemMessage(client, { conversacionId, text: systemText });
 
     await createNotification(client, {
-      usuarioid: Number(cita.pacienteid),
+      usuarioid: cita.paciente_usuarioid,
       tipo: "cita_actualizada",
       titulo: "Videollamada finalizada",
       contenido: completarCita
