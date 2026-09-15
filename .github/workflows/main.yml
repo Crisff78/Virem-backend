@@ -11,7 +11,6 @@ jobs:
     name: Security & Performance Tests
     runs-on: ubuntu-latest
 
-    # 1. Levantamos una base de datos PostgreSQL temporal
     services:
       postgres:
         image: postgres:15
@@ -40,15 +39,16 @@ jobs:
       - name: Install Dependencies
         run: npm ci
 
+      - name: Load Base Schema
+        run: PGPASSWORD=virem_password psql -h localhost -U virem_user -d virem_test_db -f db/esquema_base.sql
+
       - name: Run Test Suite
-        # 2. Corremos las migraciones antes de las pruebas
         run: |
           node scripts/migrations.js
           node --test tests/security-1e.test.js
           node --test verify-performance-2a.js
           node verify-concurrency-2b.js
         env:
-          # 3. Conectamos el backend a la base de datos temporal
           DATABASE_URL: postgresql://virem_user:virem_password@localhost:5432/virem_test_db
           JWT_SECRET: "test-secret-ci"
 
