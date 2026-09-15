@@ -3,6 +3,10 @@
 -- routes/{auth,medicos,pacientes,agenda}.routes.js y services/agenda-service.js,
 -- descontando lo que crean/agregan db/fase2_*.sql ... db/fase8_*.sql,
 -- scripts/migrations/20260914_02a_runtime_schema.sql y los migradores de precios/pagos.
+-- Excepcion de bootstrap para CI: receta_medica conserva la definicion de
+-- db/fase7_recetas.sql porque la migracion versionada la ALTERA pero no la CREA.
+-- No es una entidad historica de Fase 1; se incluye para permitir tambien
+-- el flujo esquema_base.sql -> scripts/migrations.js del pipeline actual.
 -- No se conserva un dump de Fase 1: longitudes, defaults y nulabilidad no
 -- recuperables se definen aqui de forma explicita; no es una copia historica exacta.
 --
@@ -118,6 +122,24 @@ CREATE TABLE cita (
     nota TEXT,
     CONSTRAINT cita_pacienteid_fkey FOREIGN KEY (pacienteid)
         REFERENCES paciente(pacienteid) ON UPDATE CASCADE ON DELETE RESTRICT
+);
+
+-- Prerrequisito de la migracion versionada 2A (definicion de fase7_recetas.sql).
+-- Conservar la FK actual a usuario, aunque la columna se llame pacienteid.
+-- No agregar aqui disponible_paciente, signos_vitales_json, ordenes_laboratorio
+-- ni doctor_info_json: esos campos pertenecen a la migracion versionada.
+-- Fase 7 puede ejecutarse despues: su CREATE TABLE usa IF NOT EXISTS y sus
+-- indices siguen siendo responsabilidad de ese script.
+CREATE TABLE receta_medica (
+    recetaid UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    citaid UUID NOT NULL,
+    pacienteid INTEGER NOT NULL REFERENCES usuario(usuarioid) ON DELETE CASCADE,
+    medicoid_text TEXT NOT NULL,
+    diagnostico TEXT NOT NULL,
+    medicamentos_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+    instrucciones TEXT,
+    url_pdf TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- Unica semilla de Fase 1: IDs de rol usados literalmente por el backend.
