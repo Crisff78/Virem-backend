@@ -23,7 +23,7 @@ function database(options = {}) {
 
 test('migration is atomic, versioned and is not repeated on a subsequent run', async () => {
   const db = database();
-  assert.deepEqual(await runMigrations(db), [REQUIRED_SCHEMA_VERSION]);
+  assert.deepEqual(await runMigrations(db), migrations.map(m => m.version));
   assert.equal(db.calls[0], 'BEGIN'); assert.equal(db.calls.at(-1), 'COMMIT');
   assert.ok(db.calls.indexOf('SELECT pg_advisory_xact_lock(867473, 2001)') <
     db.calls.findIndex(sql => sql.startsWith('CREATE TABLE')));

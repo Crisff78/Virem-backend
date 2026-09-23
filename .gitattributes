@@ -1,0 +1,6 @@
+# Binary fixtures must never get line-ending conversion.
+*.pdf binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary

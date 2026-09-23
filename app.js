@@ -23,7 +23,7 @@ function createApp() {
     const app = express();
     
     app.use((req, res, next) => {
-        console.log(`\n🚀 [${new Date().toLocaleTimeString()}] LLEGÓ PETICIÓN: ${req.method} ${req.url}`);
+        console.log(`\n🚀 [${new Date().toLocaleTimeString()}] LLEGÓ PETICIÓN: ${req.method} ${require('./services/patient-assistant/log-path').logPath(req)}`);
         next();
     });
 
@@ -69,6 +69,15 @@ function createApp() {
     app.use(securityHeaders);
     app.use(cors(corsOptions));
     app.use(globalLimiter);
+    const { createAssistantRouter } = require('./routes/patient-assistant.routes');
+    const { createStore } = require('./services/patient-assistant/store');
+    const { createOpenAIProvider } = require('./services/patient-assistant/provider');
+    const { requireAuth } = require('./routes/middleware/auth');
+    const { requireRole } = require('./routes/middleware/access-control');
+    app.use('/api/patient-assistant', createAssistantRouter({
+        store: createStore(require('./config/db')), provider: createOpenAIProvider(),
+        authenticate: requireAuth, patientOnly: requireRole(1),
+    }));
     app.use(express.json({ limit: getJsonBodyLimit() }));
 
     app.get("/", (req, res) => {

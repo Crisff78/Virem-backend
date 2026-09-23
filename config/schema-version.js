@@ -1,4 +1,4 @@
-const REQUIRED_SCHEMA_VERSION = '20260914_02a_runtime_schema';
+const REQUIRED_SCHEMA_VERSION = '20260922_patient_assistant';
 
 async function assertSchemaReady(db) {
   try {
