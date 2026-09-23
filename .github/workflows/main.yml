@@ -52,6 +52,10 @@ jobs:
           DATABASE_URL: postgresql://virem_user:virem_password@localhost:5432/virem_test_db
           JWT_SECRET: "test-secret-ci"
 
+      # In-memory PostgreSQL and synthetic providers: no OpenAI key and no paid API calls.
+      - name: Patient Assistant Tests
+        run: npm run test:assistant
+
   deploy-production:
     name: Deploy to Production
     needs: test
