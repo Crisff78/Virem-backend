@@ -30,6 +30,11 @@ const PORT = process.env.PORT || 3000;
 async function start() {
   // Read-only readiness check: deploy migrations before starting the application.
   await assertSchemaReady(pool);
+  const assistantStore = require('./services/patient-assistant/store').createStore(pool);
+  await assistantStore.cleanup();
+  setInterval(() => assistantStore.cleanup().catch(() => {
+    sysLogger.add('assistant_cleanup_failed', 'ERROR');
+  }), 60 * 60 * 1000).unref();
   await ensureEstadoCatalog(pool);
   initializeSocketServer(httpServer);
   setInterval(() => {

@@ -1,5 +1,7 @@
 # Migración 2A
 
+El migrador también incluye `20260922_patient_assistant`, aplicada el 22 de septiembre de 2026 a la base Supabase configurada, por instrucción del usuario. Crea las cuatro tablas privadas del asistente, activa RLS y elimina sus concesiones predeterminadas a roles distintos del propietario. El backend configurado se conecta como propietario; no necesita acceso mediante las APIs públicas de Supabase. No cambiar esta migración después de aplicarla: cualquier ajuste posterior requiere una nueva versión.
+
 Esta migración traslada el esquema y las correcciones de datos que antes ejecutaban
 los servicios durante el arranque y las peticiones. Incluye perfiles, recetas,
 agenda, registro, recuperación de contraseña y MFA. Presupone las tablas base de

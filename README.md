@@ -2,6 +2,20 @@
 
 Backend en Node.js + Express + PostgreSQL para autenticacion, agenda medica, chat y videollamada por cita.
 
+## Asistente de salud para pacientes
+
+Implementación, configuración, migración, límites, privacidad y continuidad: [guía del asistente](docs/patient-assistant.md).
+Pruebas aisladas: `npm run test:assistant`. Vista previa sintética: `NODE_ENV=development` y `npm run preview:assistant` (solo localhost:3101).
+
+**Portal local con respuestas reales:** `NODE_ENV=development` y `npm run preview:portal:openai`, junto con `npm run preview:portal` en frontend. OpenAI con consumo, base de pacientes de prueba en memoria y aviso visible; activado y comprobado con una pregunta real por autorización del usuario. El modo `preview:portal` sin `:openai` conserva respuestas fijas de demostración.
+
+Validación dentro del portal completo: `NODE_ENV=development` y `npm run preview:portal` (API local 3103), junto con `npm run preview:portal` en frontend (web 8086). Usa el login y middleware Bearer reales con cuentas y base sintéticas; no carga `.env` ni envía correos. Estado actual: 35/35 pruebas aisladas del asistente y 84/84 en la suite completa. [Cuentas de prueba y resultados](../entregables/asistente-salud/VALIDACION-PORTAL.md).
+La versión requiere `node scripts/migrations.js` antes del arranque; conserva las migraciones anteriores y añade `20260922_patient_assistant`.
+
+Estado local: clave OpenAI reutilizada de Korthyx por indicación del usuario, modelos verificados y migración aplicada a la base Supabase configurada el 22/09/2026. Posteriormente se autorizó y comprobó inferencia real con preguntas y documentos de prueba; las pruebas automáticas siguen sin APIs de pago. No hubo despliegue. Las pruebas en dispositivos móviles se omitieron por instrucción del usuario.
+
+Corrección de respuestas interrumpidas: el esquema de OpenAI conserva límites de listas y números coherentes con Zod, y distingue errores de formato, interrupción, cuota temporal y timeout sin registrar contenido. Validación: 29 pruebas aisladas aprobadas y recorrido PDF con OpenAI completado. Backend corregido local en 3103 (nuevo puerto predeterminado), conectado a la vista existente de 8086; login y explicación documental verificados en navegador. Comandos y estado de la sesión anterior: [validación del portal](../entregables/asistente-salud/VALIDACION-PORTAL.md#corrección-de-explicación-interrumpida-2026-09-22).
+
 ## Requisitos
 - Node.js 18+
 - PostgreSQL 13+

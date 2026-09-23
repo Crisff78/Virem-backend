@@ -4,10 +4,9 @@ const path = require('node:path');
 const { createHash } = require('node:crypto');
 const { REQUIRED_SCHEMA_VERSION } = require('../config/schema-version');
 
-const migrations = [{
-  version: REQUIRED_SCHEMA_VERSION,
-  file: path.join(__dirname, 'migrations', `${REQUIRED_SCHEMA_VERSION}.sql`),
-}];
+const migrations = ['20260914_02a_runtime_schema', REQUIRED_SCHEMA_VERSION].map(version => ({
+  version, file: path.join(__dirname, 'migrations', `${version}.sql`),
+}));
 
 async function runMigrations(client) {
   const applied = [];

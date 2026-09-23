@@ -1,7 +1,8 @@
 const sysLogger = require("../utils/sysLogger");
 
 function systemRequestLogger(req, res, next) {
-  const { method, url } = req;
+    const method = req.method;
+    const url = require('../services/patient-assistant/log-path').logPath(req);
   const start = Date.now();
 
   res.on("finish", () => {
